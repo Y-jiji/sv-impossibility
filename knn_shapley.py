@@ -116,7 +116,7 @@ def knn_alter_validation(
     # maximize the similarity between heuristic labeling and valid labeling, 
     #   i.e. maximize our data selection performance
     label_heu = knn_predict(K, input_tra[index_sel], label_tra[index_sel], input_val)
-    lp += (pulp.lpSum([label_var[j, label_heu[j]] for j in range(M)]), "similarity")
+    lp += (pulp.lpSum([label_var[j, label_heu[j]] for j in range(M)]), "valuation-performance")
     print("initial gap: ", pulp.value(a) - pulp.value(b), "(sanity check)")
     # solve linear programming, and create results
     lp.solve(pulp.getSolver("COIN_CMD", msg=False, warmStart=True))
@@ -126,7 +126,24 @@ def knn_alter_validation(
     assert index_new == index_sel
     return input_val, label_new
 
-def expriment_1_MNIST(K: int, S: int):
+def experiment_1_SYNTH(N: int, M: int, K: int, S: int):
+    drift = np.array([0.0, 0.0])
+    input_tra = np.random.randn(N, 2) + drift
+    label_tra = 1 * (input_tra[:, 0] > -input_tra[:, 1])
+    input_val = np.random.randn(M, 2) + drift
+    label_val = 1 * (input_val[:, 0] > -input_val[:, 1])
+    input_new, label_new = knn_alter_validation(1, S, input_tra, label_tra, input_val, label_val)
+    print("label similarity", (label_new == label_val).sum() / M)
+    s0 = knn_shapley(K, input_tra, label_tra, input_val, label_val).argsort(0)[N-S:]
+    s1 = knn_shapley(K, input_tra, label_tra, input_new, label_new).argsort(0)[N-S:]
+    r00 = ((knn_predict(K, input_tra, label_tra, input_val) == label_val) * 1).sum() / M
+    r01 = ((knn_predict(K, input_tra, label_tra, input_new) == label_new) * 1).sum() / M
+    print("original accuracy", f'{r00:.04}', f'{r01:.04}')
+    r10 = ((knn_predict(K, input_tra[s0], label_tra[s0], input_val) == label_val) * 1).sum() / M
+    r11 = ((knn_predict(K, input_tra[s1], label_tra[s1], input_new) == label_new) * 1).sum() / M
+    print("relative accuracy", f'{r10 / r00:.04}', f'{r11 / r01:.04}')
+
+def experiment_1_CIFAR(K: int, S: int):
     """
     Perform validation data alternating on MNIST dataset. 
     -- Split dataset into training dataset and validation dataset. 
@@ -135,29 +152,13 @@ def expriment_1_MNIST(K: int, S: int):
         K: K-nearest neighbours K
         S: the selected dataset size
     OUTPUT: 
-        TODO: what visualization?
+        PCA visualization of all photos
     """
-    pass
-
-def experiment_1_CIFAR(K: int, S: int):
-    pass
+    import torchvision
+    dataset = torchvision.datasets.CIFAR10("_data", download=True)
+    for x, y in dataset:
+        print(x)
+        print(y)
 
 if __name__ == '__main__':
-    N = 1000
-    M = 100
-    S = 100
-    drift = np.array([0.0, 0.0])
-    input_tra = np.random.randn(N, 2) + drift
-    label_tra = 1 * (input_tra[:, 0] > -input_tra[:, 1])
-    input_val = np.random.randn(M, 2) + drift
-    label_val = 1 * (input_val[:, 0] > -input_val[:, 1])
-    input_new, label_new = knn_alter_validation(1, S, input_tra, label_tra, input_val, label_val)
-    print("label similarity", (label_new == label_val).sum() / M)
-    s0 = knn_shapley(5, input_tra, label_tra, input_val, label_val).argsort(0)[N-S:]
-    s1 = knn_shapley(5, input_tra, label_tra, input_new, label_new).argsort(0)[N-S:]
-    r00 = ((knn_predict(5, input_tra, label_tra, input_val) == label_val) * 1).sum() / M
-    r01 = ((knn_predict(5, input_tra, label_tra, input_new) == label_new) * 1).sum() / M
-    print("original accuracy", f'{r00:.04}', f'{r01:.04}')
-    r10 = ((knn_predict(5, input_tra[s0], label_tra[s0], input_val) == label_val) * 1).sum() / M
-    r11 = ((knn_predict(5, input_tra[s1], label_tra[s1], input_new) == label_new) * 1).sum() / M
-    print("relative accuracy", f'{r10 / r00:.04}', f'{r11 / r01:.04}')
+    experiment_1_CIFAR(5, 100)
