@@ -1,4 +1,3 @@
-import numpy as np
 import torch as t
 
 def dist(x1: t.Tensor, x2: t.Tensor) -> t.Tensor:
@@ -64,7 +63,6 @@ def knn_alter_validation(
     The construction heuristic guarantees the top-S SV elements doesn't change. 
     INPUT: 
         K: K-nearest neighbours K
-        S: the selected dataset size
         input_tra: training dataset input, shape [N, D]
         label_tra: training dataset label, shape [N]
         input_val: validation dataset input, shape [M, D]
@@ -82,7 +80,6 @@ def knn_alter_validation(
     score_tra = knn_shapley(K, input_tra, label_tra, input_val, label_val)
     # selected indices
     index_sel = sorted(score_tra.argsort(0)[N-S:N].tolist())
-    print("initial gap: ", score_tra[index_sel].min().item() - score_tra[score_tra.argsort(0)[:N-S]].max().item())
     # for selected indices, relabel inputs with predicted labels w.r.t. selected index
     lp = pulp.LpProblem("label-construction", pulp.LpMaximize)
     label_var = pulp.LpVariable.dict("label-category", (range(M), range(L)), lowBound=0, upBound=1)
@@ -112,30 +109,24 @@ def knn_alter_validation(
     # split training instance to two halves, and create two variables: 
     # -- one for the minimal value from selected subset
     # -- another for the maximal value from its complement
-    a = pulp.LpVariable("min-sv-selected")
-    b = pulp.LpVariable("max-sv-unselected")
-    a.setInitialValue(min([pulp.value(sv[i]) for i in index_sel]))
-    for i in index_sel:
-        lp += (a <= sv[i])
-    b.setInitialValue(max([pulp.value(sv[i]) for i in set(range(N)).difference(index_sel)]))
-    for i in set(range(N)).difference(index_sel):
-        lp += (b >= sv[i])
-    lp += (a >= b)
+    argsort = score_tra.argsort(0)
+    for i in range(N-1):
+        lp += (sv[argsort[i].item()] <= sv[argsort[i+1].item()])
     # maximize the similarity between heuristic labeling and valid labeling, 
     #   i.e. maximize our data selection performance
     label_heu = knn_predict(K, input_tra[index_sel], label_tra[index_sel], input_val)
     lp += (pulp.lpSum([label_var[j, label_heu[j].item()] for j in range(M)]), "valuation-performance")
-    print("initial gap: ", pulp.value(a) - pulp.value(b), "(sanity check)")
     # solve linear programming, and create results
     print('trying to find the best relabeling (20 secs)')
     lp.solve(pulp.getSolver("COIN_CMD", msg=False, warmStart=True))
     print("solver status: ", pulp.LpStatus[lp.status])
     label_new = t.tensor([[pulp.value(label_var[i, j]) for j in range(L)] for i in range(M)]).argmax(1)
-    # index_new = sorted(list(knn_shapley(K, input_tra, label_tra, input_val, label_new).argsort(0)[N-S:N]))
-    # assert index_new == index_sel, f"{index_new}\n{index_sel}"
     return input_val, label_new
 
 def experiment_1_SYNTH(N: int, M: int, K: int, S: int):
+    """
+    Perform 
+    """
     drift = t.tensor([0.0, 0.0])
     input_tra = t.randn(N, 2).to(t.float64) + drift.to(t.float64)
     label_tra = 1 * (input_tra[:, 0] > -input_tra[:, 1])
@@ -154,6 +145,7 @@ def experiment_1_SYNTH(N: int, M: int, K: int, S: int):
 
 def experiment_1_CIFAR(K: int, S: int):
     """
+    Experiment 1 try to demonstrate when validation set changes, the data selection performance may change drastically even if Shapley value don't change. Therefore, Shapley value may not be a good indicator for data selection. 
     Perform validation data alternating on MNIST dataset. 
     -- Split dataset into training dataset and validation dataset. 
     -- Extract features for each MNIST datapoint. 
@@ -163,25 +155,33 @@ def experiment_1_CIFAR(K: int, S: int):
     OUTPUT: 
         PCA visualization of all photos
     """
+    import torch.utils.data as data
     import torchvision
+    import torchvision.transforms as transforms
     import matplotlib.pyplot as plt
-    from skimage.feature import hog
-    from sklearn.decomposition import PCA
     from scipy.stats import spearmanr
     from random import shuffle, seed
-    import tqdm
+    from tqdm import tqdm
     seed(114514)
     dataset = (
         torchvision.datasets.CIFAR10("_data", download=True, train=True) +
         torchvision.datasets.CIFAR10("_data", download=True, train=False)
     )
+    resnet = torchvision.models.resnet50().to('cuda:0')
+    @t.no_grad()
     def load(index: t.tensor):
+        tt = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Lambda(lambda x: x.to('cuda:0'))
+        ])
+        subset = data.Subset(dataset, index)
         xs, ys = [], []
-        for i in tqdm.tqdm(index, "preprocessing"):
-            x, y = dataset[i]
-            xs.append(hog(np.array(x) / 255, channel_axis=2))
+        collate = lambda xs: (t.stack([tt(x) for x, y in xs], 0), t.tensor([y for x, y in xs], device='cpu'))
+        for x, y in tqdm(data.DataLoader(subset, 16, collate_fn=collate), 'preprocessing'):
+            xs.append(resnet(x).to('cpu'))
             ys.append(y)
-        return t.tensor(np.array(xs)), t.tensor(ys)
+        return t.concat(xs), t.concat(ys)
     A = len(dataset)
     B = 4000
     N = (B*3)//5
@@ -222,11 +222,15 @@ def experiment_2_CIFAR(K: int, S: int):
     Experiment 2 is about failure patterns of Shapley values. 
     -- Add a few samples in training set and validation set. 
     -- These samples are corrupted. 
-    -- If we only add samples to training set, then the labels don't change. 
-    -- If we add samples to validation set, the corrupted samples are selected. 
-    
+    -- If we only add samples to training set, then the labels don't change and have very low SVs. 
+    -- If we also add samples to validation set, the corrupted samples are selected with very high SVs. 
+    If we have a pair of traning set and a validation set. 
+    INPUT:
+        TODO
+    OUTPUT:
+        TODO
     """
-
+    pass
 
 if __name__ == '__main__':
     experiment_1_CIFAR(5, 100)
