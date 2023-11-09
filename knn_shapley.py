@@ -1,5 +1,4 @@
 import numpy as np
-import scipy.spatial as spatial
 import torch as t
 
 def dist(x1: t.Tensor, x2: t.Tensor) -> t.Tensor:
@@ -86,7 +85,8 @@ def knn_alter_validation(
     print("initial gap: ", score_tra[index_sel].min().item() - score_tra[score_tra.argsort(0)[:N-S]].max().item())
     # for selected indices, relabel inputs with predicted labels w.r.t. selected index
     lp = pulp.LpProblem("label-construction", pulp.LpMaximize)
-    label_var = pulp.LpVariable.dict("label-category", (range(M), range(L)), cat=pulp.LpBinary)
+    label_var = pulp.LpVariable.dict("label-category", (range(M), range(L)), lowBound=0, upBound=1)
+    # label_var[i][j] = 1: for i th instance, label is j
     for i in range(M):
         for j in range(L):
             if label_val[i] == j:
@@ -97,6 +97,7 @@ def knn_alter_validation(
         lp += pulp.lpSum([label_var[i, j] for j in range(L)]) == 1
     # shapley values computed for each validation instance, and each value of label
     # aggregate shapley values to each training instance
+    # sv_list[i, j] : for the j th validation instance, shapley value for i th training instance is sv_list[i, j]. 
     argsort = dist(input_val, input_tra).argsort(1)
     sv_list = pulp.LpVariable.dict("sv-list", (range(N), range(M)))
     for j in tqdm(range(M), "write constraints"):
@@ -127,11 +128,11 @@ def knn_alter_validation(
     print("initial gap: ", pulp.value(a) - pulp.value(b), "(sanity check)")
     # solve linear programming, and create results
     print('trying to find the best relabeling (20 secs)')
-    lp.solve(pulp.getSolver("COIN_CMD", msg=False, warmStart=True, timeLimit=20))
+    lp.solve(pulp.getSolver("COIN_CMD", msg=False, warmStart=True))
     print("solver status: ", pulp.LpStatus[lp.status])
     label_new = t.tensor([[pulp.value(label_var[i, j]) for j in range(L)] for i in range(M)]).argmax(1)
-    index_new = sorted(list(knn_shapley(K, input_tra, label_tra, input_val, label_new).argsort(0)[N-S:N]))
-    assert index_new == index_sel, f"{index_new}\n{index_sel}"
+    # index_new = sorted(list(knn_shapley(K, input_tra, label_tra, input_val, label_new).argsort(0)[N-S:N]))
+    # assert index_new == index_sel, f"{index_new}\n{index_sel}"
     return input_val, label_new
 
 def experiment_1_SYNTH(N: int, M: int, K: int, S: int):
@@ -166,8 +167,10 @@ def experiment_1_CIFAR(K: int, S: int):
     import matplotlib.pyplot as plt
     from skimage.feature import hog
     from sklearn.decomposition import PCA
-    from random import shuffle
+    from scipy.stats import spearmanr
+    from random import shuffle, seed
     import tqdm
+    seed(114514)
     dataset = (
         torchvision.datasets.CIFAR10("_data", download=True, train=True) +
         torchvision.datasets.CIFAR10("_data", download=True, train=False)
@@ -180,7 +183,7 @@ def experiment_1_CIFAR(K: int, S: int):
             ys.append(y)
         return t.tensor(np.array(xs)), t.tensor(ys)
     A = len(dataset)
-    B = 2000
+    B = 4000
     N = (B*3)//5
     M = (B*1)//5
     T = (B*1)//5
@@ -194,22 +197,36 @@ def experiment_1_CIFAR(K: int, S: int):
     input_tra, label_tra = load(index_tra)
     input_val, label_val = load(index_val)
     input_tes, label_tes = load(index_tes)
-    sv = knn_shapley(K, input_tra, label_tra, input_val, label_val)
-    select = sv.argsort(0)[N-S:]
+    sv_0 = knn_shapley(K, input_tra, label_tra, input_val, label_val)
+    select = sv_0.argsort(0)[N-S:]
+    _label_val = label_val
     print('==')
     print('original dataset')
+    label_tes = knn_predict(K, input_val, label_val, input_tes)
     print('acc:', (label_tes == knn_predict(K, input_tra, label_tra, input_tes)).sum().item() / T, '(all data)')
     print('acc:', (label_tes == knn_predict(K, input_tra[select], label_tra[select], input_tes)).sum().item() / T, '(after selection)')
     # construct label-altered validation set and testing
     print('==')
     print('altered dataset')
     input_val, label_val = knn_alter_validation(K, S, input_tra, label_tra, input_val, label_val)
-    sv = knn_shapley(K, input_tra, label_tra, input_val, label_val)
-    select = sv.argsort(0)[N-S:]
+    sv_1 = knn_shapley(K, input_tra, label_tra, input_val, label_val)
+    print('spearman:', spearmanr(sv_0, sv_1))
+    select = sv_1.argsort(0)[N-S:]
+    print((label_val == _label_val).sum() / M)
     label_tes = knn_predict(K, input_val, label_val, input_tes)
     print('acc:', (label_tes == knn_predict(K, input_tra, label_tra, input_tes)).sum().item() / T, '(all data)')
     print('acc:', (label_tes == knn_predict(K, input_tra[select], label_tra[select], input_tes)).sum().item() / T, '(after selection)')
 
+def experiment_2_CIFAR(K: int, S: int):
+    """
+    Experiment 2 is about failure patterns of Shapley values. 
+    -- Add a few samples in training set and validation set. 
+    -- These samples are corrupted. 
+    -- If we only add samples to training set, then the labels don't change. 
+    -- If we add samples to validation set, the corrupted samples are selected. 
+    
+    """
+
+
 if __name__ == '__main__':
-    # experiment_1_SYNTH(1000, 100, 5, 100)
     experiment_1_CIFAR(5, 100)
