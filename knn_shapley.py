@@ -256,6 +256,8 @@ def load_OPENML(N: int, M: int, T: int, FILE_NAME: str):
     def load(index: t.Tensor):
         return x[index], y[index]
     A = x.shape[0]
+    if N+M+T > A: 
+        N, M, T = A*N//(N+M+T), A*M//(N+M+T), A*T//(N+M+T)
     index_all = list(range(A))
     shuffle(index_all)
     index_all = index_all[:N+M+T]
