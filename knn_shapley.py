@@ -250,12 +250,12 @@ def load_OPENML(N: int, M: int, T: int, FILE_NAME: str):
     seed(114514)
     with open(f"OpenML_datasets/{FILE_NAME}", "rb") as f:
         data_dict = pickle.load(f)
-    x = data_dict['X_num']
-    y = data_dict['y'].shape
+    x = t.tensor(data_dict['X_num'])
+    y = t.tensor(data_dict['y'])
     @t.no_grad()
     def load(index: t.Tensor):
         return x[index], y[index]
-    A = len(x.shape[0])
+    A = x.shape[0]
     index_all = list(range(A))
     shuffle(index_all)
     index_all = index_all[:N+M+T]
@@ -299,8 +299,8 @@ def experiment_1(K: int, S: list[int], predict: object, dataset: tuple[tuple, tu
     # construct label-altered validation set and testing
     print('==')
     print('altered dataset')
-    # input_val, label_val = knn_alter_validation(K, S, input_tra, label_tra, input_val, label_val)
-    label_val = predict(input_tra[select], label_tra[select], input_val)
+    input_val, label_val = knn_alter_validation(K, S, input_tra, label_tra, input_val, label_val)
+    # label_val = predict(input_tra[select], label_tra[select], input_val)
     sv_1 = knn_shapley(K, input_tra, label_tra, input_val, label_val)
     print('spearman:', spearmanr(sv_0, sv_1))
     select = sv_1.argsort(0)[N-S:]
@@ -327,5 +327,5 @@ if __name__ == '__main__':
     experiment_1(
         5, 100, 
         lambda x_tra, y_tra, x_val: reg_predict(1, x_tra, y_tra, x_val), 
-        dataset=load_OPENML(800, 400, 400, "2dplanes_727.pkl")
+        dataset=load_OPENML(800, 400, 400, "phoneme_1489.pkl")
     )
