@@ -77,10 +77,13 @@ def reg_predict(C: int, input_tra: t.Tensor, label_tra: t.Tensor, input_val: t.T
         input_val: validation dataset input, shape [M, D]
     """
     from sklearn.linear_model import LogisticRegression
-    model = LogisticRegression(C=C)
-    model.fit(input_tra, label_tra)
-    output = model.predict(input_val)
-    return t.tensor(output, device=input_tra.device)
+    try:
+        model = LogisticRegression(C=C)
+        model.fit(input_tra, label_tra)
+        output = model.predict(input_val)
+        return t.tensor(output, device=input_tra.device)
+    except:
+        return t.zeros(input_val.shape[0]).fill_(label_tra[0])
 
 def knn_alter_validation(
         K: int, S: int,
@@ -301,13 +304,15 @@ def experiment_1(K: int, S: list[int], predict: object, dataset: tuple[tuple, tu
     # construct label-altered validation set and testing
     print('==')
     print('altered dataset')
-    input_val, label_val = knn_alter_validation(K, S, input_tra, label_tra, input_val, label_val)
-    # label_val = predict(input_tra[select], label_tra[select], input_val)
+    # input_val, label_val = knn_alter_validation(K, S, input_tra, label_tra, input_val, label_val)
+    label_val = predict(input_tra[select], label_tra[select], input_val)
+    print(label_val)
     sv_1 = knn_shapley(K, input_tra, label_tra, input_val, label_val)
     print('spearman:', spearmanr(sv_0, sv_1))
     select = sv_1.argsort(0)[N-S:]
     label_tes = predict(input_val, label_val, input_tes)
     print('acc:', (label_tes == predict(input_tra, label_tra, input_tes)).sum().item() / T, '(all data)')
+    print(label_tra[select])
     print('acc:', (label_tes == predict(input_tra[select], label_tra[select], input_tes)).sum().item() / T, '(after selection)')
 
 def experiment_2_CIFAR(K: int, S: int):
