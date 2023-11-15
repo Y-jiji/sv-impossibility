@@ -53,7 +53,6 @@ def data_shapley(S: int, input_tra: t.Tensor, label_tra: t.Tensor, input_val: t.
     print(perms.shape)
     pass
 
-
 def knn_predict(K: int, input_tra: t.Tensor, label_tra: t.Tensor, input_val: t.Tensor):
     """
     predict validation labels for each data point. (with k-nn model)
@@ -63,8 +62,6 @@ def knn_predict(K: int, input_tra: t.Tensor, label_tra: t.Tensor, input_val: t.T
         label_tra: training dataset label, shape [N]
         input_val: validation dataset input, shape [M, D]
     """
-    N, D = input_tra.shape
-    M, D = input_val.shape
     a_sort = dist(input_val, input_tra).argsort(1)
     labels = label_tra[a_sort[:, :K]]
     counts = (labels.reshape(*labels.shape, 1) == t.arange(0, labels.max()+1)).sum(1)
@@ -232,7 +229,46 @@ def load_CIFAR(N: int, M: int, T: int):
     input_tes, label_tes = load(index_tes)
     return (input_tra, label_tra), (input_val, label_val), (input_tes, label_tes)
 
-def experiment_1_CIFAR(K: int, S: int, predict: object, dataset: tuple[tuple, tuple, tuple]):
+def load_OPENML(N: int, M: int, T: int, FILE_NAME: str):
+    """
+    Load an openml dataset and split it. 
+    INPUT: 
+        N: training set size
+        M: validation set size
+        T: test set size
+    OUTPUT: 
+        (input_tra, label_tra), (input_val, label_val), (input_tes, label_tes)
+        input_tra: training dataset input, shape [N, D]
+        label_tra: training dataset label, shape [N]
+        input_val: validation dataset input, shape [M, D]
+        label_val: validation dataset label, shape [M]
+        input_tes: test dataset input, shape [T, D]
+        label_tes: test dataset label, shape [T]
+    """
+    import pickle
+    from random import shuffle, seed
+    seed(114514)
+    with open(f"OpenML_datasets/{FILE_NAME}", "rb") as f:
+        data_dict = pickle.load(f)
+    x = data_dict['X_num']
+    y = data_dict['y'].shape
+    @t.no_grad()
+    def load(index: t.Tensor):
+        return x[index], y[index]
+    A = len(x.shape[0])
+    index_all = list(range(A))
+    shuffle(index_all)
+    index_all = index_all[:N+M+T]
+    index_tra = index_all[0:N]
+    index_val = index_all[N:N+M]
+    index_tes = index_all[N+M:N+M+T]
+    # train, validate and test on original dataset
+    input_tra, label_tra = load(index_tra)
+    input_val, label_val = load(index_val)
+    input_tes, label_tes = load(index_tes)
+    return (input_tra, label_tra), (input_val, label_val), (input_tes, label_tes)
+
+def experiment_1(K: int, S: list[int], predict: object, dataset: tuple[tuple, tuple, tuple]):
     """
     Experiment 1 try to demonstrate when validation set changes, the data selection performance may change drastically even if Shapley value don't change. Therefore, Shapley value may not be a good indicator for data selection. 
     Perform validation data alternating on MNIST dataset. 
@@ -288,8 +324,8 @@ def experiment_2_CIFAR(K: int, S: int):
     pass
 
 if __name__ == '__main__':
-    experiment_1_CIFAR(
+    experiment_1(
         5, 100, 
-        lambda x_tra, y_tra, x_val: knn_predict(10, x_tra, y_tra, x_val), 
-        dataset=load_CIFAR(4000, 2000, 2000)
+        lambda x_tra, y_tra, x_val: reg_predict(1, x_tra, y_tra, x_val), 
+        dataset=load_OPENML(800, 400, 400, "2dplanes_727.pkl")
     )
