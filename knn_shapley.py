@@ -290,6 +290,6 @@ def experiment_2_CIFAR(K: int, S: int):
 if __name__ == '__main__':
     experiment_1_CIFAR(
         5, 100, 
-        lambda x_tra, y_tra, x_val: reg_predict(1, x_tra, y_tra, x_val), 
+        lambda x_tra, y_tra, x_val: knn_predict(10, x_tra, y_tra, x_val), 
         dataset=load_CIFAR(4000, 2000, 2000)
     )
