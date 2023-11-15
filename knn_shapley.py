@@ -1,4 +1,6 @@
 import torch as t
+import warnings
+warnings.filterwarnings('ignore')
 
 def dist(x1: t.Tensor, x2: t.Tensor) -> t.Tensor:
     return t.einsum("ij, ij -> i", x1, x1).unsqueeze(-1) + t.einsum("ij, ij -> i", x2, x2) - 2 * t.einsum("ij, kj -> ik", x1, x2)
@@ -36,7 +38,7 @@ def knn_shapley(K: int, input_tra: t.Tensor, label_tra: t.Tensor, input_val: t.T
 
 def knn_predict(K: int, input_tra: t.Tensor, label_tra: t.Tensor, input_val: t.Tensor):
     """
-    predict validation labels for each data point. 
+    predict validation labels for each data point. (with k-nn model)
     INPUT:
         K: K-nearest neighbours K
         input_tra: training dataset input, shape [N, D]
@@ -49,6 +51,21 @@ def knn_predict(K: int, input_tra: t.Tensor, label_tra: t.Tensor, input_val: t.T
     labels = label_tra[a_sort[:, :K]]
     counts = (labels.reshape(*labels.shape, 1) == t.arange(0, labels.max()+1)).sum(1)
     return counts.argmax(1)
+
+def reg_predict(C: int, input_tra: t.Tensor, label_tra: t.Tensor, input_val: t.Tensor):
+    """
+    predict validatiaon labels for each data point. (with regression model)
+    INPUT: 
+        C: C parameter (1/λ, where λ is the l2 penality)
+        input_tra: training dataset input, shape [N, D]
+        label_tra: training dataset label, shape [N]
+        input_val: validation dataset input, shape [M, D]
+    """
+    from sklearn.linear_model import LogisticRegression
+    model = LogisticRegression(C=C)
+    model.fit(input_tra, label_tra)
+    output = model.predict(input_val)
+    return t.tensor(output, device=input_tra.device)
 
 def knn_alter_validation(
         K: int, S: int,
@@ -143,7 +160,7 @@ def experiment_1_SYNTH(N: int, M: int, K: int, S: int):
     r11 = ((knn_predict(K, input_tra[s1], label_tra[s1], input_new) == label_new) * 1).sum() / M
     print("relative accuracy", f'{r10 / r00:.04}', f'{r11 / r01:.04}')
 
-def experiment_1_CIFAR(K: int, S: int):
+def experiment_1_CIFAR(K: int, S: int, predict: object):
     """
     Experiment 1 try to demonstrate when validation set changes, the data selection performance may change drastically even if Shapley value don't change. Therefore, Shapley value may not be a good indicator for data selection. 
     Perform validation data alternating on MNIST dataset. 
@@ -152,6 +169,7 @@ def experiment_1_CIFAR(K: int, S: int):
     INPUT: 
         K: K-nearest neighbours K
         S: the selected dataset size
+        predict: function with format input_tra, label_tra, input_val -> label_val
     OUTPUT: 
         PCA visualization of all photos
     """
@@ -183,7 +201,7 @@ def experiment_1_CIFAR(K: int, S: int):
             ys.append(y)
         return t.concat(xs), t.concat(ys)
     A = len(dataset)
-    B = 4000
+    B = 2000
     N = (B*3)//5
     M = (B*1)//5
     T = (B*1)//5
@@ -199,23 +217,23 @@ def experiment_1_CIFAR(K: int, S: int):
     input_tes, label_tes = load(index_tes)
     sv_0 = knn_shapley(K, input_tra, label_tra, input_val, label_val)
     select = sv_0.argsort(0)[N-S:]
-    _label_val = label_val
+    # use knn as proximal construction method
     print('==')
     print('original dataset')
-    label_tes = knn_predict(K, input_val, label_val, input_tes)
-    print('acc:', (label_tes == knn_predict(K, input_tra, label_tra, input_tes)).sum().item() / T, '(all data)')
-    print('acc:', (label_tes == knn_predict(K, input_tra[select], label_tra[select], input_tes)).sum().item() / T, '(after selection)')
+    label_tes = predict(input_val, label_val, input_tes)
+    print('acc:', (label_tes == predict(input_tra, label_tra, input_tes)).sum().item() / T, '(all data)')
+    print('acc:', (label_tes == predict(input_tra[select], label_tra[select], input_tes)).sum().item() / T, '(after selection)')
     # construct label-altered validation set and testing
     print('==')
     print('altered dataset')
-    input_val, label_val = knn_alter_validation(K, S, input_tra, label_tra, input_val, label_val)
+    # input_val, label_val = knn_alter_validation(K, S, input_tra, label_tra, input_val, label_val)
+    label_val = predict(input_tra[select], label_tra[select], input_val)
     sv_1 = knn_shapley(K, input_tra, label_tra, input_val, label_val)
     print('spearman:', spearmanr(sv_0, sv_1))
     select = sv_1.argsort(0)[N-S:]
-    print((label_val == _label_val).sum() / M)
-    label_tes = knn_predict(K, input_val, label_val, input_tes)
-    print('acc:', (label_tes == knn_predict(K, input_tra, label_tra, input_tes)).sum().item() / T, '(all data)')
-    print('acc:', (label_tes == knn_predict(K, input_tra[select], label_tra[select], input_tes)).sum().item() / T, '(after selection)')
+    label_tes = predict(input_val, label_val, input_tes)
+    print('acc:', (label_tes == predict(input_tra, label_tra, input_tes)).sum().item() / T, '(all data)')
+    print('acc:', (label_tes == predict(input_tra[select], label_tra[select], input_tes)).sum().item() / T, '(after selection)')
 
 def experiment_2_CIFAR(K: int, S: int):
     """
@@ -233,4 +251,4 @@ def experiment_2_CIFAR(K: int, S: int):
     pass
 
 if __name__ == '__main__':
-    experiment_1_CIFAR(5, 100)
+    experiment_1_CIFAR(5, 100, lambda x_tra, y_tra, x_val: reg_predict(1, x_tra, y_tra, x_val))
