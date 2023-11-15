@@ -7,7 +7,7 @@ def dist(x1: t.Tensor, x2: t.Tensor) -> t.Tensor:
 
 def knn_shapley(K: int, input_tra: t.Tensor, label_tra: t.Tensor, input_val: t.Tensor, label_val: t.Tensor):
     """
-    R. Jia's algorithm for KNN Shapley Values. 
+    R. Jia's algorithm for KNN Shapley values. 
     Original KNN-Shapley is proposed in http://www.vldb.org/pvldb/vol12/p1610-jia.pdf. 
     INPUT: 
         K: K-nearest neighbours K
@@ -35,6 +35,24 @@ def knn_shapley(K: int, input_tra: t.Tensor, label_tra: t.Tensor, input_val: t.T
     output = t.zeros_like(sv)
     output[arange, a_sort] = sv
     return output.sum(0)
+
+def data_shapley(S: int, input_tra: t.Tensor, label_tra: t.Tensor, input_val: t.Tensor, label_val: t.Tensor):
+    """
+    A. Ghorbani's algorithm for Shapley values. 
+    INPUT: 
+        S: # of permutation samples
+        input_tra: training dataset input, shape [N, D]
+        label_tra: training dataset label, shape [N]
+        input_val: validation dataset input, shape [M, D]
+        label_val: validation dataset label, shape [M]
+    OUTPUT:
+        Shapley Values for each training datapoint. 
+    """
+    N, D = input_tra.shape
+    perms = t.rand((S, N)).argsort(-1)
+    print(perms.shape)
+    pass
+
 
 def knn_predict(K: int, input_tra: t.Tensor, label_tra: t.Tensor, input_val: t.Tensor):
     """
@@ -160,26 +178,27 @@ def experiment_1_SYNTH(N: int, M: int, K: int, S: int):
     r11 = ((knn_predict(K, input_tra[s1], label_tra[s1], input_new) == label_new) * 1).sum() / M
     print("relative accuracy", f'{r10 / r00:.04}', f'{r11 / r01:.04}')
 
-def experiment_1_CIFAR(K: int, S: int, predict: object):
+def load_CIFAR(N: int, M: int, T: int):
     """
-    Experiment 1 try to demonstrate when validation set changes, the data selection performance may change drastically even if Shapley value don't change. Therefore, Shapley value may not be a good indicator for data selection. 
-    Perform validation data alternating on MNIST dataset. 
-    -- Split dataset into training dataset and validation dataset. 
-    -- Extract features for each MNIST datapoint. 
+    Load CIFAR 10 data set and preprocessing. 
     INPUT: 
-        K: K-nearest neighbours K
-        S: the selected dataset size
-        predict: function with format input_tra, label_tra, input_val -> label_val
+        N: training set size
+        M: validation set size
+        T: test set size
     OUTPUT: 
-        PCA visualization of all photos
+        (input_tra, label_tra), (input_val, label_val), (input_tes, label_tes)
+        input_tra: training dataset input, shape [N, D]
+        label_tra: training dataset label, shape [N]
+        input_val: validation dataset input, shape [M, D]
+        label_val: validation dataset label, shape [M]
+        input_tes: test dataset input, shape [T, D]
+        label_tes: test dataset label, shape [T]
     """
     import torch.utils.data as data
     import torchvision
     import torchvision.transforms as transforms
-    import matplotlib.pyplot as plt
-    from scipy.stats import spearmanr
-    from random import shuffle, seed
     from tqdm import tqdm
+    from random import shuffle, seed
     seed(114514)
     dataset = (
         torchvision.datasets.CIFAR10("_data", download=True, train=True) +
@@ -201,13 +220,9 @@ def experiment_1_CIFAR(K: int, S: int, predict: object):
             ys.append(y)
         return t.concat(xs), t.concat(ys)
     A = len(dataset)
-    B = 2000
-    N = (B*3)//5
-    M = (B*1)//5
-    T = (B*1)//5
     index_all = list(range(A))
     shuffle(index_all)
-    index_all = index_all[:B]
+    index_all = index_all[:N+M+T]
     index_tra = index_all[0:N]
     index_val = index_all[N:N+M]
     index_tes = index_all[N+M:N+M+T]
@@ -215,6 +230,28 @@ def experiment_1_CIFAR(K: int, S: int, predict: object):
     input_tra, label_tra = load(index_tra)
     input_val, label_val = load(index_val)
     input_tes, label_tes = load(index_tes)
+    return (input_tra, label_tra), (input_val, label_val), (input_tes, label_tes)
+
+def experiment_1_CIFAR(K: int, S: int, predict: object, dataset: tuple[tuple, tuple, tuple]):
+    """
+    Experiment 1 try to demonstrate when validation set changes, the data selection performance may change drastically even if Shapley value don't change. Therefore, Shapley value may not be a good indicator for data selection. 
+    Perform validation data alternating on MNIST dataset. 
+    -- Split dataset into training dataset and validation dataset. 
+    -- Extract features for each MNIST datapoint. 
+    INPUT: 
+        K: K-nearest neighbours K
+        S: the selected dataset size
+        predict: function with format input_tra, label_tra, input_val -> label_val
+    OUTPUT: 
+        PCA visualization of all photos
+    """
+    from scipy.stats import spearmanr
+    # train, validate and test on original dataset
+    input_tra, label_tra = dataset[0]
+    input_val, label_val = dataset[1]
+    input_tes, label_tes = dataset[2]
+    N = input_tra.shape[0]
+    T = input_tes.shape[0]
     sv_0 = knn_shapley(K, input_tra, label_tra, input_val, label_val)
     select = sv_0.argsort(0)[N-S:]
     # use knn as proximal construction method
@@ -251,4 +288,8 @@ def experiment_2_CIFAR(K: int, S: int):
     pass
 
 if __name__ == '__main__':
-    experiment_1_CIFAR(5, 100, lambda x_tra, y_tra, x_val: reg_predict(1, x_tra, y_tra, x_val))
+    experiment_1_CIFAR(
+        5, 100, 
+        lambda x_tra, y_tra, x_val: reg_predict(1, x_tra, y_tra, x_val), 
+        dataset=load_CIFAR(4000, 2000, 2000)
+    )
