@@ -50,7 +50,6 @@ def data_shapley(S: int, input_tra: t.Tensor, label_tra: t.Tensor, input_val: t.
     """
     N, D = input_tra.shape
     perms = t.rand((S, N)).argsort(-1)
-    print(perms.shape)
     pass
 
 def knn_predict(K: int, input_tra: t.Tensor, label_tra: t.Tensor, input_val: t.Tensor):
@@ -284,7 +283,7 @@ def experiment_1(K: int, S: list[int], predict: object, dataset: tuple[tuple, tu
         S: the selected dataset size
         predict: function with format input_tra, label_tra, input_val -> label_val
     OUTPUT: 
-        PCA visualization of all photos
+        valutation result correspondent to selected data. 
     """
     from scipy.stats import spearmanr
     # train, validate and test on original dataset
@@ -293,27 +292,29 @@ def experiment_1(K: int, S: list[int], predict: object, dataset: tuple[tuple, tu
     input_tes, label_tes = dataset[2]
     N = input_tra.shape[0]
     T = input_tes.shape[0]
+    S = [int(x*N/max(S)) for x in S]
+    print(max(S))
+    # use knn as proximal construction method to compute shapley value
     sv_0 = knn_shapley(K, input_tra, label_tra, input_val, label_val)
-    select = sv_0.argsort(0)[N-S:]
-    # use knn as proximal construction method
-    print('==')
-    print('original dataset')
+    select = sv_0.argsort(0)
+    result_0 = []
     label_tes = predict(input_val, label_val, input_tes)
-    print('acc:', (label_tes == predict(input_tra, label_tra, input_tes)).sum().item() / T, '(all data)')
-    print('acc:', (label_tes == predict(input_tra[select], label_tra[select], input_tes)).sum().item() / T, '(after selection)')
+    for s in S:
+        acc = (label_tes == predict(input_tra[select[N-s:]], label_tra[select[N-s:]], input_tes)).sum().item() / T
+        result_0.append(acc)
     # construct label-altered validation set and testing
-    print('==')
-    print('altered dataset')
+    sv_1 = knn_shapley(K, input_tra, label_tra, input_val, label_val)
+    select = sv_1.argsort(0)[N-sum(S)//len(S):]
     # input_val, label_val = knn_alter_validation(K, S, input_tra, label_tra, input_val, label_val)
     label_val = predict(input_tra[select], label_tra[select], input_val)
-    print(label_val)
-    sv_1 = knn_shapley(K, input_tra, label_tra, input_val, label_val)
-    print('spearman:', spearmanr(sv_0, sv_1))
-    select = sv_1.argsort(0)[N-S:]
     label_tes = predict(input_val, label_val, input_tes)
-    print('acc:', (label_tes == predict(input_tra, label_tra, input_tes)).sum().item() / T, '(all data)')
-    print(label_tra[select])
-    print('acc:', (label_tes == predict(input_tra[select], label_tra[select], input_tes)).sum().item() / T, '(after selection)')
+    print('spearman:', spearmanr(sv_0, sv_1))
+    result_1 = []
+    select = sv_1.argsort(0)
+    for s in S:
+        acc = (label_tes == predict(input_tra[select[N-s:]], label_tra[select[N-s:]], input_tes)).sum().item() / T
+        result_1.append(acc)
+    return S, result_0, result_1
 
 def experiment_2_CIFAR(K: int, S: int):
     """
@@ -331,8 +332,13 @@ def experiment_2_CIFAR(K: int, S: int):
     pass
 
 if __name__ == '__main__':
-    experiment_1(
-        5, 100, 
+    import matplotlib.pyplot as plt
+    S = [i+1 for i in range(20)]
+    S, result_0, result_1 = experiment_1(5, S, 
         lambda x_tra, y_tra, x_val: reg_predict(1, x_tra, y_tra, x_val), 
-        dataset=load_OPENML(800, 400, 400, "phoneme_1489.pkl")
+        dataset=load_CIFAR(4000, 2000, 2000)
     )
+    plt.plot(S, result_0, label='original')
+    plt.plot(S, result_1, label='altered')
+    plt.legend()
+    plt.show()
