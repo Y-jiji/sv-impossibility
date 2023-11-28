@@ -5,7 +5,7 @@ warnings.filterwarnings('ignore')
 def dist(x1: t.Tensor, x2: t.Tensor) -> t.Tensor:
     return t.einsum("ij, ij -> i", x1, x1).unsqueeze(-1) + t.einsum("ij, ij -> i", x2, x2) - 2 * t.einsum("ij, kj -> ik", x1, x2)
 
-def knn_shapley(K: int, input_tra: t.Tensor, label_tra: t.Tensor, input_val: t.Tensor, label_val: t.Tensor):
+def knn_shapley(K: int, input_tra: t.Tensor, label_tra: t.Tensor, input_val: t.Tensor, label_val: t.Tensor, keep=False):
     """
     R. Jia's algorithm for KNN Shapley values. 
     Original KNN-Shapley is proposed in http://www.vldb.org/pvldb/vol12/p1610-jia.pdf. 
@@ -34,7 +34,10 @@ def knn_shapley(K: int, input_tra: t.Tensor, label_tra: t.Tensor, input_val: t.T
     # output[i, idsort[i, j]] = sv[i, j]
     output = t.zeros_like(sv)
     output[arange, a_sort] = sv
-    return output.sum(0)
+    if not keep:
+        return output.sum(0)
+    else:
+        return output
 
 def data_shapley(S: int, input_tra: t.Tensor, label_tra: t.Tensor, input_val: t.Tensor, label_val: t.Tensor):
     """
@@ -85,16 +88,15 @@ def reg_predict(C: int, input_tra: t.Tensor, label_tra: t.Tensor, input_val: t.T
         return t.zeros(input_val.shape[0]).fill_(label_tra[0])
 
 def knn_alter_validation(
-        K: int, S: int,
+        K: int, worst: bool,
         input_tra: t.Tensor, label_tra: t.Tensor, 
-        input_val: t.Tensor, label_val: t.Tensor
+        input_val: t.Tensor, label_val: t.Tensor, 
     ):
     """
     Change validation set for a given K-nearest neighbour model s.t. : 
     -- In terms of Shapely values, the same training subset still contains elements with largest Shapley values. 
     -- Valuation results change. 
     Current implementation is given by relabeling. 
-    The construction heuristic guarantees the top-S SV elements doesn't change. 
     INPUT: 
         K: K-nearest neighbours K
         input_tra: training dataset input, shape [N, D]
@@ -108,54 +110,23 @@ def knn_alter_validation(
     from tqdm import tqdm
     N, D = input_tra.shape
     M, D = input_val.shape
-    L = int(label_val.max())+1
-    assert int(label_val.min()) == 0
-    # sv for each training sample
-    score_tra = knn_shapley(K, input_tra, label_tra, input_val, label_val)
-    # selected indices
-    index_sel = sorted(score_tra.argsort(0)[N-S:N].tolist())
-    # for selected indices, relabel inputs with predicted labels w.r.t. selected index
-    lp = pulp.LpProblem("label-construction", pulp.LpMaximize)
-    label_var = pulp.LpVariable.dict("label-category", (range(M), range(L)), lowBound=0, upBound=1)
-    # label_var[i][j] = 1: for i th instance, label is j
-    for i in range(M):
-        for j in range(L):
-            if label_val[i] == j:
-                label_var[i, j].setInitialValue(1)
-            else:
-                label_var[i, j].setInitialValue(0)
-    for i in range(M):
-        lp += pulp.lpSum([label_var[i, j] for j in range(L)]) == 1
-    # shapley values computed for each validation instance, and each value of label
-    # aggregate shapley values to each training instance
-    # sv_list[i, j] : for the j th validation instance, shapley value for i th training instance is sv_list[i, j]. 
-    argsort = dist(input_val, input_tra).argsort(1)
-    sv_list = pulp.LpVariable.dict("sv-list", (range(N), range(M)))
-    for j in tqdm(range(M), "write constraints"):
-        sv_list[argsort[j, N-1].item(), j] = (label_var[j, label_tra[argsort[j, N-1]].item()] * (1 / N))
-        for i in range(N-2, -1, -1):
-            sv_list[argsort[j, i].item(), j] = (sv_list[argsort[j, i+1].item(), j]
-                + (label_var[j, label_tra[argsort[j, i].item()].item()]    * (1/max(i+1, K)))
-                - (label_var[j, label_tra[argsort[j, i+1].item()].item()]  * (1/max(i+1, K))))
-    sv = pulp.LpVariable.dict("sv", range(N))
-    for i in range(N):
-        sv[i] = pulp.lpSum([sv_list[i, j] for j in range(M)])
-    # split training instance to two halves, and create two variables: 
-    # -- one for the minimal value from selected subset
-    # -- another for the maximal value from its complement
-    argsort = score_tra.argsort(0)
-    for i in range(N-1):
-        lp += (sv[argsort[i].item()] <= sv[argsort[i+1].item()])
-    # maximize the similarity between heuristic labeling and valid labeling, 
-    #   i.e. maximize our data selection performance
-    label_heu = knn_predict(K, input_tra[index_sel], label_tra[index_sel], input_val)
-    lp += (pulp.lpSum([label_var[j, label_heu[j].item()] for j in range(M)]), "valuation-performance")
-    # solve linear programming, and create results
-    print('trying to find the best relabeling (20 secs)')
-    lp.solve(pulp.getSolver("COIN_CMD", msg=False, warmStart=True))
-    print("solver status: ", pulp.LpStatus[lp.status])
-    label_new = t.tensor([[pulp.value(label_var[i, j]) for j in range(L)] for i in range(M)]).argmax(1)
-    return input_val, label_new
+    if worst:
+        lp = pulp.LpProblem("alter-validation", pulp.LpMinimize)
+    else:
+        lp = pulp.LpProblem("alter-validation", pulp.LpMaximize)
+    index_var = pulp.LpVariable.dict("selection-index", range(M), cat=pulp.LpBinary)
+    index_trg = knn_predict(K, input_tra, label_tra, input_val) == label_val
+    sv_list = knn_shapley(K, input_tra, label_tra, input_val, label_val, keep=True)
+    sv_rank = sv_list.sum(0).argsort(0)
+    sv_alte = [pulp.lpSum([sv_list[i, j] * index_var[i] for i in range(M)]) for j in tqdm(range(N), "compute shapley values")]
+    for j in tqdm(range(N-1), "write contraints"):
+        lp += sv_alte[sv_rank[j]] <= sv_alte[sv_rank[j+1]]
+    lp += pulp.lpSum([index_var[i] * index_trg[i] + (1-index_var[i]) * ~index_trg[i] for i in range(M)])
+    lp.solve()
+    index_new = [index_var[i].value() for i in range(M)]
+    input_new = input_val[index_new]
+    label_new = label_val[index_new]
+    return input_new, label_new
 
 def experiment_1_SYNTH(N: int, M: int, K: int, S: int):
     """
@@ -166,7 +137,7 @@ def experiment_1_SYNTH(N: int, M: int, K: int, S: int):
     label_tra = 1 * (input_tra[:, 0] > -input_tra[:, 1])
     input_val = t.randn(M, 2).to(t.float64) + drift.to(t.float64)
     label_val = 1 * (input_val[:, 0] > -input_val[:, 1])
-    input_new, label_new = knn_alter_validation(K, S, input_tra, label_tra, input_val, label_val)
+    input_new, label_new = knn_alter_validation(K, input_tra, label_tra, input_val, label_val)
     print("label similarity", (label_new == label_val).sum() / M)
     s0 = knn_shapley(K, input_tra, label_tra, input_val, label_val).argsort(0)[N-S:]
     s1 = knn_shapley(K, input_tra, label_tra, input_new, label_new).argsort(0)[N-S:]
@@ -293,7 +264,6 @@ def experiment_1(K: int, S: list[int], predict: object, dataset: tuple[tuple, tu
     N = input_tra.shape[0]
     T = input_tes.shape[0]
     S = [int(x*N/max(S)) for x in S]
-    print(max(S))
     # use knn as proximal construction method to compute shapley value
     sv_0 = knn_shapley(K, input_tra, label_tra, input_val, label_val)
     select = sv_0.argsort(0)
@@ -305,8 +275,7 @@ def experiment_1(K: int, S: list[int], predict: object, dataset: tuple[tuple, tu
     # construct label-altered validation set and testing
     sv_1 = knn_shapley(K, input_tra, label_tra, input_val, label_val)
     select = sv_1.argsort(0)[N-sum(S)//len(S):]
-    # input_val, label_val = knn_alter_validation(K, S, input_tra, label_tra, input_val, label_val)
-    label_val = predict(input_tra[select], label_tra[select], input_val)
+    input_val, label_val = knn_alter_validation(K, S, input_tra, label_tra, input_val, label_val)
     label_tes = predict(input_val, label_val, input_tes)
     print('spearman:', spearmanr(sv_0, sv_1))
     result_1 = []
@@ -334,9 +303,9 @@ def experiment_2_CIFAR(K: int, S: int):
 if __name__ == '__main__':
     import matplotlib.pyplot as plt
     S = [i+1 for i in range(20)]
-    S, result_0, result_1 = experiment_1(5, S, 
-        lambda x_tra, y_tra, x_val: reg_predict(1, x_tra, y_tra, x_val), 
-        dataset=load_CIFAR(4000, 2000, 2000)
+    S, result_0, result_1 = experiment_1(15, S, 
+        lambda x_tra, y_tra, x_val: knn_predict(15, x_tra, y_tra, x_val), 
+        dataset=load_OPENML(4000, 2000, 2000, "cpu_act_761.pkl")
     )
     plt.plot(S, result_0, label='original')
     plt.plot(S, result_1, label='altered')
