@@ -2,6 +2,8 @@ import torch as t
 import warnings
 warnings.filterwarnings('ignore')
 
+t.manual_seed(9999)
+
 def dist(x1: t.Tensor, x2: t.Tensor) -> t.Tensor:
     return t.einsum("ij, ij -> i", x1, x1).unsqueeze(-1) + t.einsum("ij, ij -> i", x2, x2) - 2 * t.einsum("ij, kj -> ik", x1, x2)
 
@@ -88,9 +90,10 @@ def reg_predict(C: int, input_tra: t.Tensor, label_tra: t.Tensor, input_val: t.T
         return t.zeros(input_val.shape[0]).fill_(label_tra[0])
 
 def knn_alter_validation(
-        K: int, worst: bool,
+        K: int, S: int, 
         input_tra: t.Tensor, label_tra: t.Tensor, 
-        input_val: t.Tensor, label_val: t.Tensor, 
+        input_val: t.Tensor, label_val: t.Tensor,
+        input_tes: t.Tensor, label_tes: t.Tensor, 
     ):
     """
     Change validation set for a given K-nearest neighbour model s.t. : 
@@ -99,10 +102,13 @@ def knn_alter_validation(
     Current implementation is given by relabeling. 
     INPUT: 
         K: K-nearest neighbours K
+        S: selected subset S
         input_tra: training dataset input, shape [N, D]
         label_tra: training dataset label, shape [N]
         input_val: validation dataset input, shape [M, D]
         label_val: validation dataset label, shape [M]
+        input_tes: testing dataset input, shape [M, D]
+        label_tes: testing dataset label, shape [M]
     OUTPUT: 
         a different validation data set, with input and label, satisfying desired properties. 
     """
@@ -110,43 +116,64 @@ def knn_alter_validation(
     from tqdm import tqdm
     N, D = input_tra.shape
     M, D = input_val.shape
-    if worst:
-        lp = pulp.LpProblem("alter-validation", pulp.LpMinimize)
-    else:
-        lp = pulp.LpProblem("alter-validation", pulp.LpMaximize)
-    index_var = pulp.LpVariable.dict("selection-index", range(M), cat=pulp.LpBinary)
-    index_trg = knn_predict(K, input_tra, label_tra, input_val) == label_val
+    lp = pulp.LpProblem("alter-validation", pulp.LpMaximize)
     sv_list = knn_shapley(K, input_tra, label_tra, input_val, label_val, keep=True)
     sv_rank = sv_list.sum(0).argsort(0)
+    print(sv_rank)
+    index_var = pulp.LpVariable.dict("selection-index", range(M), lowBound=0, upBound=1, cat=pulp.LpInteger)
+    index_trg = knn_predict(K, input_tra[sv_rank[-S:]], label_tra[sv_rank[-S:]], input_val) == label_val
+    index_trg = index_trg.float()
     sv_alte = [pulp.lpSum([sv_list[i, j] * index_var[i] for i in range(M)]) for j in tqdm(range(N), "compute shapley values")]
-    for j in tqdm(range(N-1), "write contraints"):
-        lp += sv_alte[sv_rank[j]] <= sv_alte[sv_rank[j+1]]
-    lp += pulp.lpSum([index_var[i] * index_trg[i] + (1-index_var[i]) * ~index_trg[i] for i in range(M)])
+    bound = pulp.LpVariable("bound")
+    for j in range(N-S):
+        lp += sv_alte[sv_rank[j]] <= bound
+    for j in range(N-S, N):
+        lp += sv_alte[sv_rank[j]] >= bound
+    lp += (pulp.lpSum([index_var[i] for i in range(M)]) >= 1)
+    lp += pulp.lpSum([index_var[i] * index_trg[i] + (1-index_var[i]) * (1-index_trg[i]) for i in range(M)])
     lp.solve()
-    index_new = [index_var[i].value() for i in range(M)]
+    index_new = t.argwhere(t.tensor([index_var[i].value() for i in range(M)]))[:, 0]
     input_new = input_val[index_new]
     label_new = label_val[index_new]
+    sv_rank = knn_shapley(K, input_tra, label_tra, input_new, label_new, keep=False).argsort(0)
     return input_new, label_new
 
-def experiment_1_SYNTH(N: int, M: int, K: int, S: int):
+def test_knn_alter_validation_sv_eq():
+    K = 15
+    data = load_RANDOM(1000, 200, 200, 10)
+    input_new, label_new = knn_alter_validation(K, 400, *data[0], *data[1], *data[2])
+    sv1 = knn_shapley(K, *data[0], *data[1])
+    sv0 = knn_shapley(K, *data[0], input_new, label_new)
+
+def load_RANDOM(N: int, M: int, T: int, D: int):
     """
-    Perform 
+    Generate random data set. 
+    INPUT: 
+        N: training set size
+        M: validation set size
+        T: test set size
+    OUTPUT: 
+        (input_tra, label_tra), (input_val, label_val), (input_tes, label_tes)
+        input_tra: training dataset input, shape [N, D]
+        label_tra: training dataset label, shape [N]
+        input_val: validation dataset input, shape [M, D]
+        label_val: validation dataset label, shape [M]
+        input_tes: test dataset input, shape [T, D]
+        label_tes: test dataset label, shape [T]
     """
-    drift = t.tensor([0.0, 0.0])
-    input_tra = t.randn(N, 2).to(t.float64) + drift.to(t.float64)
-    label_tra = 1 * (input_tra[:, 0] > -input_tra[:, 1])
-    input_val = t.randn(M, 2).to(t.float64) + drift.to(t.float64)
-    label_val = 1 * (input_val[:, 0] > -input_val[:, 1])
-    input_new, label_new = knn_alter_validation(K, input_tra, label_tra, input_val, label_val)
-    print("label similarity", (label_new == label_val).sum() / M)
-    s0 = knn_shapley(K, input_tra, label_tra, input_val, label_val).argsort(0)[N-S:]
-    s1 = knn_shapley(K, input_tra, label_tra, input_new, label_new).argsort(0)[N-S:]
-    r00 = ((knn_predict(K, input_tra, label_tra, input_val) == label_val) * 1).sum() / M
-    r01 = ((knn_predict(K, input_tra, label_tra, input_new) == label_new) * 1).sum() / M
-    print("original accuracy", f'{r00:.04}', f'{r01:.04}')
-    r10 = ((knn_predict(K, input_tra[s0], label_tra[s0], input_val) == label_val) * 1).sum() / M
-    r11 = ((knn_predict(K, input_tra[s1], label_tra[s1], input_new) == label_new) * 1).sum() / M
-    print("relative accuracy", f'{r10 / r00:.04}', f'{r11 / r01:.04}')
+    from random import shuffle, seed
+    seed(114514)
+    index_all = list(range(N+M+T))
+    shuffle(index_all)
+    index_tra = index_all[0:N]
+    index_val = index_all[N:N+M]
+    index_tes = index_all[N+M:N+M+T]
+    input_all = t.rand(N+M+T, D)
+    label_all = t.randint(0, 10, (N+M+T, ))
+    return (
+        (input_all[index_tra], label_all[index_tra]), 
+        (input_all[index_val], label_all[index_val]), 
+        (input_all[index_tes], label_all[index_tes]))
 
 def load_CIFAR(N: int, M: int, T: int):
     """
@@ -178,7 +205,7 @@ def load_CIFAR(N: int, M: int, T: int):
     @t.no_grad()
     def load(index: t.tensor):
         tt = transforms.Compose([
-            transforms.Resize((224, 224)),
+            transforms.Resize((256, 256)),
             transforms.ToTensor(),
             transforms.Lambda(lambda x: x.to('cuda:0'))
         ])
@@ -188,7 +215,7 @@ def load_CIFAR(N: int, M: int, T: int):
         for x, y in tqdm(data.DataLoader(subset, 16, collate_fn=collate), 'preprocessing'):
             xs.append(resnet(x).to('cpu'))
             ys.append(y)
-        return t.concat(xs), t.concat(ys)
+        return t.concat(xs), t.concat(ys), subset
     A = len(dataset)
     index_all = list(range(A))
     shuffle(index_all)
@@ -197,10 +224,10 @@ def load_CIFAR(N: int, M: int, T: int):
     index_val = index_all[N:N+M]
     index_tes = index_all[N+M:N+M+T]
     # train, validate and test on original dataset
-    input_tra, label_tra = load(index_tra)
-    input_val, label_val = load(index_val)
-    input_tes, label_tes = load(index_tes)
-    return (input_tra, label_tra), (input_val, label_val), (input_tes, label_tes)
+    input_tra, label_tra, p = load(index_tra)
+    input_val, label_val, _ = load(index_val)
+    input_tes, label_tes, _ = load(index_tes)
+    return (input_tra, label_tra), (input_val, label_val), (input_tes, label_tes), p
 
 def load_OPENML(N: int, M: int, T: int, FILE_NAME: str):
     """
@@ -256,7 +283,6 @@ def experiment_1(K: int, S: list[int], predict: object, dataset: tuple[tuple, tu
     OUTPUT: 
         valutation result correspondent to selected data. 
     """
-    from scipy.stats import spearmanr
     # train, validate and test on original dataset
     input_tra, label_tra = dataset[0]
     input_val, label_val = dataset[1]
@@ -268,24 +294,20 @@ def experiment_1(K: int, S: list[int], predict: object, dataset: tuple[tuple, tu
     sv_0 = knn_shapley(K, input_tra, label_tra, input_val, label_val)
     select = sv_0.argsort(0)
     result_0 = []
-    label_tes = predict(input_val, label_val, input_tes)
     for s in S:
         acc = (label_tes == predict(input_tra[select[N-s:]], label_tra[select[N-s:]], input_tes)).sum().item() / T
         result_0.append(acc)
     # construct label-altered validation set and testing
+    input_val, label_val = knn_alter_validation(K, min(S), input_tra, label_tra, input_val, label_val, input_tes, label_tes)
     sv_1 = knn_shapley(K, input_tra, label_tra, input_val, label_val)
-    select = sv_1.argsort(0)[N-sum(S)//len(S):]
-    input_val, label_val = knn_alter_validation(K, S, input_tra, label_tra, input_val, label_val)
-    label_tes = predict(input_val, label_val, input_tes)
-    print('spearman:', spearmanr(sv_0, sv_1))
-    result_1 = []
     select = sv_1.argsort(0)
+    result_1 = []
     for s in S:
         acc = (label_tes == predict(input_tra[select[N-s:]], label_tra[select[N-s:]], input_tes)).sum().item() / T
         result_1.append(acc)
     return S, result_0, result_1
 
-def experiment_2_CIFAR(K: int, S: int):
+def experiment_2(K: int, S: int, N: int, dataset: tuple[tuple, tuple, tuple]):
     """
     Experiment 2 is about failure patterns of Shapley values. 
     -- Add a few samples in training set and validation set. 
@@ -294,20 +316,48 @@ def experiment_2_CIFAR(K: int, S: int):
     -- If we also add samples to validation set, the corrupted samples are selected with very high SVs. 
     If we have a pair of traning set and a validation set. 
     INPUT:
-        TODO
+        K: K-nearest neighbours K
+        S: the number of different shapley value groups
+        N: the size of each group
     OUTPUT:
-        TODO
+        pic: a list of pictures
+        sv: a list of shapley values, correpsonding to each picture
     """
-    pass
+    input_tra, label_tra = dataset[0]
+    input_val, label_val = dataset[1]
+    input_tes, label_tes = dataset[2]
+    pic = dataset[3]
+    for p in pic: print(p)
+    sv = knn_shapley(K, input_tra, label_tra, input_val, label_val)
+    index = sv.argsort(0, descending=True)
+    index = index[(t.arange(0, len(index) - len(index)//S, len(index)//S).unsqueeze(-1) + t.arange(0, N)).flatten()]
+    return [pic[i][0] for i in index], sv[index], [pic[i][1] for i in index]
+
+def main(experiment: int):
+    import matplotlib.pyplot as plt
+    if experiment == 1:
+        S = [i+1 for i in range(20)]
+        S, result_0, result_1 = experiment_1(15, S, 
+            lambda x_tra, y_tra, x_val: knn_predict(15, x_tra, y_tra, x_val), 
+            dataset=load_CIFAR(4000, 200, 200)
+        )
+        plt.plot(S, result_0, label='original')
+        plt.plot(S, result_1, label='altered')
+        plt.legend()
+        plt.show()
+    if experiment == 2:
+        K = 5
+        S = 3
+        N = 5
+        pic, sv, label = experiment_2(K, S, N, load_CIFAR(400, 200, 1))
+        fig, ax = plt.subplots(S, N)
+        for i in range(S):
+            for j in range(N):
+                ax[i, j].set_title(f"{sv[i*N+j].item():.2f}, label:{label[i*N+j]}")
+                ax[i, j].axis("off")
+                ax[i, j].imshow(pic[i * N + j])
+        fig.tight_layout()
+        plt.show()
 
 if __name__ == '__main__':
-    import matplotlib.pyplot as plt
-    S = [i+1 for i in range(20)]
-    S, result_0, result_1 = experiment_1(15, S, 
-        lambda x_tra, y_tra, x_val: knn_predict(15, x_tra, y_tra, x_val), 
-        dataset=load_OPENML(4000, 2000, 2000, "cpu_act_761.pkl")
-    )
-    plt.plot(S, result_0, label='original')
-    plt.plot(S, result_1, label='altered')
-    plt.legend()
-    plt.show()
+    main(2)
