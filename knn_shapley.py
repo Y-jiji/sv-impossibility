@@ -309,7 +309,7 @@ def experiment_1(K: int, S: list[int], predict: object, dataset: tuple[tuple, tu
         result_1.append(acc)
     print(sv_0.argsort(0))
     print(sv_1.argsort(0))
-    return S, result_0, result_1
+    return S, result_0, result_1, sv_0, sv_1
 
 def experiment_2(K: int, S: int, N: int, dataset: tuple[tuple, tuple, tuple]):
     """
@@ -337,61 +337,75 @@ def experiment_2(K: int, S: int, N: int, dataset: tuple[tuple, tuple, tuple]):
     index = index[(t.arange(0, len(index) - len(index)//S, len(index)//S).unsqueeze(-1) + t.arange(0, N)).flatten()]
     return [pic[i][0] for i in index], sv[index], [pic[i][1] for i in index]
 
-def main(experiment: int):
-    import matplotlib.pyplot as plt
-    if experiment == 1:
-        S = [i+1 for i in range(20)]
-        S, result_0, result_1 = experiment_1(15, S, 
-            lambda x_tra, y_tra, x_val: knn_predict(15, x_tra, y_tra, x_val), 
-            dataset=load_OPENML(6000, 500, 1, '2dplanes_727.pkl')
-        )
-        plt.plot(S, result_0, label='original')
-        plt.plot(S, result_1, label='altered')
-        plt.legend()
-        plt.show()
-    if experiment == 2:
-        K = 5
-        S = 3
-        N = 5
-        pic, sv, label = experiment_2(K, S, N, load_CIFAR(4000, 200, 1))
-        fig, ax = plt.subplots(S, N)
-        for i in range(S):
-            for j in range(N):
-                ax[i, j].set_title(f"{sv[i*N+j].item():.2f}, label:{label[i*N+j]}")
-                ax[i, j].axis("off")
-                ax[i, j].imshow(pic[i * N + j])
-        fig.tight_layout()
-        plt.show()
-
 def run_experiment_1():
     import matplotlib.pyplot as plt
     files = \
     """
-    APSFailure_41138.pkl
-    phoneme_1489.pkl
-    Click_prediction_small_1218.pkl
-    pol_722.pkl
+    2dplanes_727.pkl
     cpu_act_761.pkl
     vehicle_sensIT_357.pkl
-    CreditCardFraudDetection_42397.pkl
+    pol_722.pkl
     wind_847.pkl
+    Click_prediction_small_1218.pkl
+    CreditCardFraudDetection_42397.pkl
     default-of-credit-card-clients_42477.pkl
+    APSFailure_41138.pkl
+    phoneme_1489.pkl
     """
+    import pickle
     for dataset in files.strip().splitlines():
         dataset = dataset.strip()
         S = [i+1 for i in range(20)]
-        S, result_0, result_1 = experiment_1(15, S, 
+        S, result_0, result_1, sv_0, sv_1 = experiment_1(15, S, 
             lambda x_tra, y_tra, x_val: knn_predict(15, x_tra, y_tra, x_val), 
-            dataset=load_OPENML(600, 200, 200, dataset)
+            dataset=load_OPENML(6, 2, 2, dataset)
         )
+        with open(f"_plotdata/{dataset}", 'wb') as f:
+            pickle.dump((S, result_0, result_1, sv_0, sv_1), f)
+
+def illustrate_experiment_1():
+    import matplotlib.pyplot as plt
+    files = \
+    """
+    2dplanes_727.pkl
+    cpu_act_761.pkl
+    vehicle_sensIT_357.pkl
+    pol_722.pkl
+    wind_847.pkl
+    Click_prediction_small_1218.pkl
+    CreditCardFraudDetection_42397.pkl
+    default-of-credit-card-clients_42477.pkl
+    APSFailure_41138.pkl
+    phoneme_1489.pkl
+    """
+    import pickle
+    for dataset in files.strip().splitlines():
+        dataset = dataset.strip()
+        with open(f"_plotdata/{dataset}", 'rb') as f:
+            # S: selected dataset size
+            # result_0: accuracy when selecting with original validation set
+            # result_1: accuracy when selection with altered validation set
+            # sv_0: shapley value for each training datum by original validation set
+            # sv_1: shapley value for each training datum by altered validation set
+            S, result_0, result_1, sv_0, sv_1 = pickle.load(f)
         plt.title(dataset)
         plt.plot(S, result_0, label='original')
         plt.plot(S, result_1, label='altered')
         plt.legend()
-        plt.savefig('fig/' + dataset.split('.')[0] + '.png')
+        plt.savefig('fig/' + dataset.split('.')[0] + '-accuracy.png')
+        plt.gcf().clear()
+        # sort by original shapley value and fill
+        plt.title(dataset)
+        asort = sv_0.argsort()
+        plt.fill_between(range(sv_0.shape[0]), sv_0[asort], alpha=0.7, label='original')
+        plt.fill_between(range(sv_0.shape[0]), sv_1[asort], alpha=0.7, label='altered')
+        plt.legend()
+        plt.savefig('fig/' + dataset.split('.')[0] + '-shapley-value.png')
         plt.gcf().clear()
 
 def run_experiment_2():
+    # progressively add more deer in validation
+    # check knn
     import matplotlib.pyplot as plt
     K = 5
     S = 3
@@ -421,4 +435,5 @@ def run_experiment_2():
     plt.savefig('fig/' + 'experiment-2.png')
 
 if __name__ == '__main__':
-    run_experiment_2()
+    # run_experiment_1()
+    illustrate_experiment_1()
