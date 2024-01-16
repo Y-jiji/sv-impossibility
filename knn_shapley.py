@@ -54,10 +54,10 @@ def knn_predict(K: int, input_tra: t.Tensor, label_tra: t.Tensor, input_val: t.T
         label_tra: training dataset label, shape [N]
         input_val: validation dataset input, shape [M, D]
     """
-    a_sort = dist(input_val, input_tra).argsort(1)
-    labels = label_tra[a_sort[:, :K]]
-    counts = (labels.reshape(*labels.shape, 1) == t.arange(0, labels.max()+1)).sum(1)
-    return counts.argmax(1)
+    a_sort = dist(input_val, input_tra).argsort(-1)
+    labels = label_tra[a_sort[..., :, :K]]
+    counts = (labels.reshape(*labels.shape, 1) == t.arange(0, labels.max()+1)).sum(-1)
+    return counts.argmax(-1)
 
 def reg_predict(C: int, input_tra: t.Tensor, label_tra: t.Tensor, input_val: t.Tensor):
     """
