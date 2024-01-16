@@ -125,12 +125,9 @@ def knn_alter_validation(
         [index_var[i] * index_trg[i] + (1-index_var[i]) * (1-index_trg[i]) 
          for i in range(M)]) - gap * 10000
     lp.solve(solver=pulp.GLPK())
-    print([index_var[i].value() for i in range(M)])
     index_new = t.tensor([index_var[i].value() for i in range(M)])
-    index_new = index_new > t.rand(100, **index_new.shape)
-    input_new = input_val[index_new]
-    label_new = label_val[index_new]
-    return input_new, label_new
+    index_new = index_new > t.rand(100, *index_new.shape)
+    return index_new
 
 def test_knn_alter_validation_sv_eq():
     K = 15
@@ -287,40 +284,50 @@ def experiment_1(K: int, S: list[int], predict: object, dataset: tuple[tuple, tu
     input_tra, label_tra = dataset[0]
     input_val, label_val = dataset[1]
     input_tes, label_tes = dataset[2]
-    input_alt, label_alt = knn_alter_validation(
-        K, min(S), input_tra, label_tra, input_val, label_val)
     label_tes = knn_predict(K, input_val, label_val, input_tes)
     N = input_tra.shape[0]
     T = input_tes.shape[0]
     S = [int(x*N/max(S)) for x in S]
     # use knn as proximal construction method to compute shapley value
     sv_0 = knn_shapley(K, input_tra, label_tra, input_val, label_val)
-    select = sv_0.argsort(0)
+    select = sv_0.argsort(-1)
     result_0 = []
     for s in S:
         acc = (label_tes == predict(input_tra[select[N-s:]], label_tra[select[N-s:]], input_tes)).sum().item() / T
         result_0.append(acc)
     # randomly select samples
-    sv_1 = sv_0[..., t.randperm(sv_0.shape[0], device=sv_0.device)]
-    select = sv_1.argsort(0)
+    sv_1 = sv_0[t.randperm(sv_0.shape[0], device=sv_0.device)]
+    select = sv_1.argsort(-1)
     result_1 = []
     for s in S:
         acc = (label_tes == predict(input_tra[select[N-s:]], label_tra[select[N-s:]], input_tes)).sum().item() / T
         result_1.append(acc)
     # construct label-altered validation set and testing
-    label_tes = knn_predict(K, input_alt, label_alt, input_tes)
-    sv_2 = knn_shapley(K, input_tra, label_tra, input_alt, label_alt)
-    select = sv_2.argsort(0)
-    result_2 = []
-    for s in S:
-        acc = (label_tes == predict(input_tra[select[N-s:]], label_tra[select[N-s:]], input_tes)).sum().item() / T
-        result_2.append(acc)
-    sv_3 = sv_2[t.argsort(t.rand(*sv_2.shape), dim=-1)]
-    select = sv_3.argsort(0)
-    result_3 = []
-    for s in S:
-        acc = (label_tes == predict(input_tra[select[N-s:]], label_tra[select[N-s:]], input_tes)).sum().item() / T
-        result_3.append(acc)
+    index_alt = knn_alter_validation(
+        K, min(S), input_tra, label_tra, input_val, label_val)
+    def compute(index):
+        input_alt, label_alt = input_val[index], label_val[index]
+        label_tes = knn_predict(K, input_alt, label_alt, input_tes)
+        sv_2 = knn_shapley(K, input_tra, label_tra, input_alt, label_alt)
+        select = sv_2.argsort(-1)
+        result_2 = []
+        for s in S:
+            acc = (label_tes == predict(input_tra[select[N-s:]], label_tra[select[N-s:]], input_tes)).sum().item() / T
+            result_2.append(acc)
+        sv_3 = sv_2[t.argsort(t.rand(*sv_2.shape), dim=-1)]
+        select = sv_3.argsort(-1)
+        result_3 = []
+        for s in S:
+            acc = (label_tes == predict(input_tra[select[N-s:]], label_tra[select[N-s:]], input_tes)).sum().item() / T
+            result_3.append(acc)
+        return result_2, result_3, sv_2, sv_3
+    result_2, result_3, sv_2, sv_3 = [], [], [], []
+    for index in index_alt:
+        _result_2, _result_3, _sv_2, _sv_3 = compute(index)
+        result_2.append(_result_2)
+        result_3.append(_result_3)
+        sv_2.append(_sv_2)
+        sv_3.append(_sv_3)
     return S, result_0, result_1, result_2, result_3, sv_0, sv_1, sv_2, sv_3
 
 def experiment_2(K: int, S: int, N: int, dataset: tuple[tuple, tuple, tuple]):
@@ -366,21 +373,21 @@ def run_experiment_1():
     """
     import pickle
     S = [i+1 for i in range(20)]
-    S, result_0, result_1, result_2, sv_0, sv_1, sv_2 = experiment_1(15, S, 
+    data = experiment_1(15, S, 
         lambda x_tra, y_tra, x_val: knn_predict(15, x_tra, y_tra, x_val), 
         dataset=load_CIFAR(1200, 400, 400)
     )
     with open(f"_plotdata/cifar", 'wb') as f:
-        pickle.dump((S, result_0, result_1, result_2, sv_0, sv_1, sv_2), f)
+        pickle.dump((data), f)
     for dataset in files.strip().splitlines():
         dataset = dataset.strip()
         S = [i+1 for i in range(20)]
-        S, result_0, result_1, result_2, sv_0, sv_1, sv_2 = experiment_1(15, S, 
+        data = experiment_1(15, S, 
             lambda x_tra, y_tra, x_val: knn_predict(15, x_tra, y_tra, x_val), 
             dataset=load_OPENML(6, 2, 2, dataset)
         )
         with open(f"_plotdata/{dataset}", 'wb') as f:
-            pickle.dump((S, result_0, result_1, result_2, sv_0, sv_1, sv_2), f)
+            pickle.dump((data), f)
 
 def illustrate_experiment_1():
     import matplotlib.pyplot as plt
@@ -407,11 +414,14 @@ def illustrate_experiment_1():
         # sv_0: shapley value for each training datum by original validation set
         # sv_1: shapley value for each training datum by altered validation set
         # sv_2: shapley value for each training datum by randomized validation set
-        S, result_0, result_1, result_2, sv_0, sv_1, sv_2 = pickle.load(f)
+        S, result_0, result_1, result_2, result_3, sv_0, sv_1, sv_2, sv_3 = pickle.load(f)
     plt.title(dataset)
+    plt.subplot(1, 2, 1)
     plt.plot(S, result_0, label='original')
-    plt.plot(S, result_1, label='altered')
-    plt.plot(S, result_2, label='random')
+    plt.plot(S, result_1, label='random')
+    plt.subplot(1, 2, 2)
+    plt.plot(S, result_2, label='altered')
+    plt.plot(S, result_3, label='random')
     plt.legend()
     plt.savefig('fig/' + dataset.split('.')[0] + '-accuracy.png')
     plt.gcf().clear()
@@ -484,5 +494,5 @@ def run_experiment_2():
     plt.savefig('fig/' + 'experiment-2.png')
 
 if __name__ == '__main__':
-    # run_experiment_1()
-    illustrate_experiment_1()
+    run_experiment_1()
+    # illustrate_experiment_1()
