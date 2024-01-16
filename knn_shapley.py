@@ -27,21 +27,21 @@ def knn_shapley(K: int, input_tra: t.Tensor, label_tra: t.Tensor, input_val: t.T
     N, D = input_tra.shape
     M, D = input_val.shape
     # sort values by distance to valuation datum for each valutation datum
-    a_sort = dist(input_val, input_tra).argsort(1)
+    a_sort = dist(input_val, input_tra).argsort(-1)
     arange = t.arange(0, M).reshape(M, 1)
     # eqtest[i, j] = label_val[i] == label_tra[idsort[i, j]]
     # sv[i, N-1] = eqtest[i, N-1] / N
     # sv[i, j] = sv[i, j+1] + (eqtest[i, j] - eqtest[i, j+1]) / max(K, j+1)
-    eqtest = 1.0 * (label_val.reshape(M, 1) == label_tra)[arange, a_sort]
+    eqtest = 1.0 * (label_val.reshape(M, 1) == label_tra)[..., arange, a_sort]
     eqdiff = t.zeros_like(eqtest)
-    eqdiff[:,  N-1] = eqtest[:, N-1] / N
-    eqdiff[:, :N-1] = (eqtest[:, :N-1] - eqtest[:, 1:]) / t.maximum(t.tensor(K), t.arange(1, N))
-    sv = t.flip(t.flip(eqdiff, (1,)).cumsum(1), (1,))
+    eqdiff[...,  N-1] = eqtest[..., N-1] / N
+    eqdiff[..., :N-1] = (eqtest[..., :N-1] - eqtest[..., 1:]) / t.maximum(t.tensor(K), t.arange(1, N))
+    sv = t.flip(t.flip(eqdiff, (-1,)).cumsum(-1), (-1,))
     # output[i, idsort[i, j]] = sv[i, j]
     output = t.zeros_like(sv)
     output[arange, a_sort] = sv
     if not keep:
-        return output.sum(0)
+        return output.sum(-2)
     else:
         return output
 
@@ -127,11 +127,9 @@ def knn_alter_validation(
     lp.solve(solver=pulp.GLPK())
     print([index_var[i].value() for i in range(M)])
     index_new = t.tensor([index_var[i].value() for i in range(M)])
-    index_new = index_new > index_new.mean()
+    index_new = index_new > t.rand(100, **index_new.shape)
     input_new = input_val[index_new]
     label_new = label_val[index_new]
-    sv_rank = knn_shapley(
-        K, input_tra, label_tra, input_new, label_new, keep=False).argsort(0)
     return input_new, label_new
 
 def test_knn_alter_validation_sv_eq():
@@ -303,7 +301,7 @@ def experiment_1(K: int, S: list[int], predict: object, dataset: tuple[tuple, tu
         acc = (label_tes == predict(input_tra[select[N-s:]], label_tra[select[N-s:]], input_tes)).sum().item() / T
         result_0.append(acc)
     # randomly select samples
-    sv_1 = sv_0[t.randperm(sv_0.shape[0], device=sv_0.device)]
+    sv_1 = sv_0[..., t.randperm(sv_0.shape[0], device=sv_0.device)]
     select = sv_1.argsort(0)
     result_1 = []
     for s in S:
@@ -317,6 +315,12 @@ def experiment_1(K: int, S: list[int], predict: object, dataset: tuple[tuple, tu
     for s in S:
         acc = (label_tes == predict(input_tra[select[N-s:]], label_tra[select[N-s:]], input_tes)).sum().item() / T
         result_2.append(acc)
+    sv_3 = sv_2[t.argsort(t.rand(*sv_2.shape), dim=-1)]
+    select = sv_3.argsort(0)
+    result_3 = []
+    for s in S:
+        acc = (label_tes == predict(input_tra[select[N-s:]], label_tra[select[N-s:]], input_tes)).sum().item() / T
+        result_3.append(acc)
     return S, result_0, result_1, result_2, result_3, sv_0, sv_1, sv_2, sv_3
 
 def experiment_2(K: int, S: int, N: int, dataset: tuple[tuple, tuple, tuple]):
