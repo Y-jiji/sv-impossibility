@@ -115,15 +115,15 @@ def knn_alter_validation(
     index_trg = knn_predict(K, input_tra[sv_rank[-S:]], label_tra[sv_rank[-S:]], input_val) == label_val
     index_trg = index_trg.float()
     sv_alte = [pulp.lpSum([sv_list[i, j] * index_var[i] for i in range(M)]) for j in tqdm(range(N), "compute shapley values")]
-    gap = pulp.LpVariable("gap")
-    lp += (gap >= 0)
+    gap = pulp.LpVariable.dict("gap", range(N-1), 0.0)
+    tot = pulp.lpSum(gap)
     for j in range(N-1):
-        lp += sv_alte[sv_rank[j]] <= sv_alte[sv_rank[j+1]] + gap
+        lp += sv_alte[sv_rank[j]] <= sv_alte[sv_rank[j+1]] + gap[j]
     lp += (pulp.lpSum([index_var[i] for i in range(M)]) >= M//4)
     lp += (pulp.lpSum([index_var[i] for i in range(M)]) <= M*3//4)
     lp += pulp.lpSum(
         [index_var[i] * index_trg[i] + (1-index_var[i]) * (1-index_trg[i])
-         for i in range(M)]) - gap * 1000
+         for i in range(M)]) - tot * 1000
     lp.solve(solver=pulp.GLPK(msg=0))
     index_new = t.tensor([index_var[i].value() for i in range(M)])
     index_new = index_new > t.rand(100, *index_new.shape)
@@ -255,9 +255,7 @@ def load_OPENML(N: int, M: int, T: int, FILE_NAME: str):
     shuffle(index_all)
     A = x.shape[0] // 4
     index_all = index_all[:A]
-    print(A)
     N, M, T = A*N//(N+M+T), A*M//(N+M+T), A*T//(N+M+T)
-    print(N, M, T)
     index_all = index_all[:N+M+T]
     index_tra = index_all[0:N]
     index_val = index_all[N:N+M]
@@ -288,8 +286,7 @@ def experiment_1(K: int, S: list[int], predict: object, dataset: tuple[tuple, tu
     N = input_tra.shape[0]
     T = input_tes.shape[0]
     S = [int(x*N/max(S)) for x in S]
-    index = t.randperm(N)[:8*N//10]
-    label_tes = knn_predict(K, input_tra[index], label_tra[index], input_tes)
+    label_tes = knn_predict(K, input_val, label_val, input_tes)
     # use knn as proximal construction method to compute shapley value
     sv_0 = knn_shapley(K, input_tra, label_tra, input_val, label_val)
     select = sv_0.argsort(-1)
@@ -357,7 +354,6 @@ def experiment_2(K: int, S: int, N: int, dataset: tuple[tuple, tuple, tuple]):
     """
     input_tra, label_tra = dataset[0]
     input_val, label_val = dataset[1]
-    input_tes, label_tes = dataset[2]
     pic = dataset[3]
     for p in pic: print(p)
     sv = knn_shapley(K, input_tra, label_tra, input_val, label_val)
