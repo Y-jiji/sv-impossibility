@@ -54,10 +54,10 @@ def knn_predict(K: int, input_tra: t.Tensor, label_tra: t.Tensor, input_val: t.T
         label_tra: training dataset label, shape [N]
         input_val: validation dataset input, shape [M, D]
     """
-    a_sort = dist(input_val, input_tra).argsort(-1)
+    a_sort = dist(input_val, input_tra).argsort(1)
     labels = label_tra[a_sort[..., :, :K]]
-    counts = (labels.reshape(*labels.shape, 1) == t.arange(0, labels.max()+1)).sum(-1)
-    return counts.argmax(-1)
+    counts = (labels.reshape(*labels.shape, 1) == t.arange(0, labels.max()+1)).sum(1)
+    return counts.argmax(1)
 
 def reg_predict(C: int, input_tra: t.Tensor, label_tra: t.Tensor, input_val: t.Tensor):
     """
@@ -122,9 +122,9 @@ def knn_alter_validation(
     lp += (pulp.lpSum([index_var[i] for i in range(M)]) >= M//4)
     lp += (pulp.lpSum([index_var[i] for i in range(M)]) <= M*3//4)
     lp += pulp.lpSum(
-        [index_var[i] * index_trg[i] + (1-index_var[i]) * (1-index_trg[i]) 
-         for i in range(M)]) - gap * 10000
-    lp.solve(solver=pulp.GLPK())
+        [index_var[i] * index_trg[i] + (1-index_var[i]) * (1-index_trg[i])
+         for i in range(M)]) - gap * 1000
+    lp.solve(solver=pulp.GLPK(msg=0))
     index_new = t.tensor([index_var[i].value() for i in range(M)])
     index_new = index_new > t.rand(100, *index_new.shape)
     return index_new
@@ -242,6 +242,7 @@ def load_OPENML(N: int, M: int, T: int, FILE_NAME: str):
     from random import shuffle, seed
     seed(114514)
     t.manual_seed(114514)
+    print(f'load {FILE_NAME}')
     with open(f"OpenML_datasets/{FILE_NAME}", "rb") as f:
         data_dict = pickle.load(f)
     x = t.tensor(data_dict['X_num'])
@@ -284,10 +285,11 @@ def experiment_1(K: int, S: list[int], predict: object, dataset: tuple[tuple, tu
     input_tra, label_tra = dataset[0]
     input_val, label_val = dataset[1]
     input_tes, label_tes = dataset[2]
-    label_tes = knn_predict(K, input_val, label_val, input_tes)
     N = input_tra.shape[0]
     T = input_tes.shape[0]
     S = [int(x*N/max(S)) for x in S]
+    index = t.randperm(N)[:8*N//10]
+    label_tes = knn_predict(K, input_tra[index], label_tra[index], input_tes)
     # use knn as proximal construction method to compute shapley value
     sv_0 = knn_shapley(K, input_tra, label_tra, input_val, label_val)
     select = sv_0.argsort(-1)
@@ -296,12 +298,19 @@ def experiment_1(K: int, S: list[int], predict: object, dataset: tuple[tuple, tu
         acc = (label_tes == predict(input_tra[select[N-s:]], label_tra[select[N-s:]], input_tes)).sum().item() / T
         result_0.append(acc)
     # randomly select samples
-    sv_1 = sv_0[t.randperm(sv_0.shape[0], device=sv_0.device)]
-    select = sv_1.argsort(-1)
-    result_1 = []
-    for s in S:
-        acc = (label_tes == predict(input_tra[select[N-s:]], label_tra[select[N-s:]], input_tes)).sum().item() / T
-        result_1.append(acc)
+    def compute():
+        sv_1 = sv_0[t.argsort(t.rand(*sv_0.shape), dim=-1)]
+        select = sv_1.argsort(-1)
+        result_1 = []
+        for s in S:
+            acc = (label_tes == predict(input_tra[select[N-s:]], label_tra[select[N-s:]], input_tes)).sum().item() / T
+            result_1.append(acc)
+        return result_1, sv_1
+    result_1, sv_1 = [], []
+    for i in range(100):
+        _result_1, _sv_1 = compute()
+        result_1.append(_result_1)
+        sv_1.append(_sv_1)
     # construct label-altered validation set and testing
     index_alt = knn_alter_validation(
         K, min(S), input_tra, label_tra, input_val, label_val)
@@ -366,7 +375,6 @@ def run_experiment_1():
     pol_722.pkl
     wind_847.pkl
     Click_prediction_small_1218.pkl
-    CreditCardFraudDetection_42397.pkl
     default-of-credit-card-clients_42477.pkl
     APSFailure_41138.pkl
     phoneme_1489.pkl
@@ -393,71 +401,52 @@ def illustrate_experiment_1():
     import matplotlib.pyplot as plt
     files = \
     """
+    cifar
     2dplanes_727.pkl
     cpu_act_761.pkl
     vehicle_sensIT_357.pkl
     pol_722.pkl
     wind_847.pkl
     Click_prediction_small_1218.pkl
-    CreditCardFraudDetection_42397.pkl
     default-of-credit-card-clients_42477.pkl
     APSFailure_41138.pkl
     phoneme_1489.pkl
     """
     import pickle
-    dataset = 'cifar'
-    with open(f"_plotdata/{dataset}", 'rb') as f:
-        # S: selected dataset size
-        # result_0: accuracy when selecting with original validation set
-        # result_1: accuracy when selection with altered validation set
-        # result_2: accuracy when selection with randomized validation set
-        # sv_0: shapley value for each training datum by original validation set
-        # sv_1: shapley value for each training datum by altered validation set
-        # sv_2: shapley value for each training datum by randomized validation set
-        S, result_0, result_1, result_2, result_3, sv_0, sv_1, sv_2, sv_3 = pickle.load(f)
-    plt.title(dataset)
-    plt.subplot(1, 2, 1)
-    plt.plot(S, result_0, label='original')
-    plt.plot(S, result_1, label='random')
-    plt.subplot(1, 2, 2)
-    plt.plot(S, result_2, label='altered')
-    plt.plot(S, result_3, label='random')
-    plt.legend()
-    plt.savefig('fig/' + dataset.split('.')[0] + '-accuracy.png')
-    plt.gcf().clear()
-    # sort by original shapley value and fill
-    plt.title(dataset)
-    asort = sv_0.argsort()
-    plt.fill_between(range(sv_0.shape[0]), sv_0[asort], alpha=0.7, label='original')
-    plt.fill_between(range(sv_0.shape[0]), sv_1[asort], alpha=0.7, label='altered')
-    plt.fill_between(range(sv_0.shape[0]), sv_2[asort], alpha=0.7, label='randomized')
-    plt.legend()
-    plt.savefig('fig/' + dataset.split('.')[0] + '-shapley-value.png')
-    plt.gcf().clear()
     for dataset in files.strip().splitlines():
         dataset = dataset.strip()
         with open(f"_plotdata/{dataset}", 'rb') as f:
             # S: selected dataset size
             # result_0: accuracy when selecting with original validation set
-            # result_1: accuracy when selection with altered validation set
-            # result_2: accuracy when selection with randomized validation set
+            # result_1: accuracy when selection with randomized validation set
+            # result_2: accuracy when selection with altered validation set
+            # result_3: accuracy when selection with randomized validation set
             # sv_0: shapley value for each training datum by original validation set
-            # sv_1: shapley value for each training datum by altered validation set
-            # sv_2: shapley value for each training datum by randomized validation set
-            S, result_0, result_1, result_2, sv_0, sv_1, sv_2 = pickle.load(f)
-        plt.title(dataset)
-        plt.plot(S, result_0, label='original')
-        plt.plot(S, result_1, label='altered')
-        plt.plot(S, result_2, label='random')
+            # sv_1: shapley value for each training datum by randomized validation set
+            # sv_2: shapley value for each training datum by altered validation set
+            # sv_3: shapley value for each training datum by randomized validation set
+            S, result_0, result_1, result_2, result_3, sv_0, sv_1, sv_2, sv_3 = pickle.load(f)
+            result_1, result_2, result_3 = t.tensor(result_1), t.tensor(result_2), t.tensor(result_3)
+        plt.subplot(1, 2, 1)
+        plt.title(dataset + '-original')
+        plt.plot(S, result_0, label='original', color='red')
+        plt.plot(S, result_1.mean(0), label='random', color='blue')
+        plt.fill_between(S, result_1.mean(0)-result_1.std(0), result_1.mean(0)+result_1.std(0), alpha=0.5, color='blue')
+        plt.legend()
+        plt.subplot(1, 2, 2)
+        plt.title(dataset + '-altered')
+        plt.plot(S, result_2.mean(0), label='altered', color='red')
+        plt.plot(S, result_3.mean(0), label='random', color='blue')
+        plt.fill_between(S, result_2.mean(0)-result_2.std(0), result_2.mean(0)+result_2.std(0), alpha=0.5, color='red')
+        plt.fill_between(S, result_3.mean(0)-result_3.std(0), result_3.mean(0)+result_3.std(0), alpha=0.5, color='blue')
         plt.legend()
         plt.savefig('fig/' + dataset.split('.')[0] + '-accuracy.png')
         plt.gcf().clear()
         # sort by original shapley value and fill
         plt.title(dataset)
         asort = sv_0.argsort()
-        plt.fill_between(range(sv_0.shape[0]), sv_0[asort], alpha=0.7, label='original')
-        plt.fill_between(range(sv_0.shape[0]), sv_1[asort], alpha=0.7, label='altered')
-        plt.fill_between(range(sv_0.shape[0]), sv_2[asort], alpha=0.7, label='randomized')
+        plt.fill_between(range(sv_0.shape[0]), sv_0[asort], alpha=0.7, label='original', color='red')
+        plt.fill_between(range(sv_0.shape[0]), t.stack(sv_2)[..., asort].mean(0), alpha=0.7, label='altered', color='blue')
         plt.legend()
         plt.savefig('fig/' + dataset.split('.')[0] + '-shapley-value.png')
         plt.gcf().clear()
@@ -495,4 +484,4 @@ def run_experiment_2():
 
 if __name__ == '__main__':
     run_experiment_1()
-    # illustrate_experiment_1()
+    illustrate_experiment_1()
