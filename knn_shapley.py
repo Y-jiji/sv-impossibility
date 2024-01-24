@@ -81,6 +81,7 @@ def knn_alter_validation(
         K: int, S: int, 
         input_tra: t.Tensor, label_tra: t.Tensor, 
         input_val: t.Tensor, label_val: t.Tensor,
+        minimize: bool = True,
     ):
     """
     Change validation set for a given K-nearest neighbour model s.t. : 
@@ -121,7 +122,7 @@ def knn_alter_validation(
         lp += sv_alte[sv_rank[j]] <= sv_alte[sv_rank[j+1]] + gap[j]
     lp += (pulp.lpSum([index_var[i] for i in range(M)]) >= M//4)
     lp += (pulp.lpSum([index_var[i] for i in range(M)]) <= M*3//4)
-    lp += pulp.lpSum(
+    lp += (1 if minimize else -1) * pulp.lpSum(
         [index_var[i] * index_trg[i] + (1-index_var[i]) * (1-index_trg[i])
          for i in range(M)]) - tot * 1000
     lp.solve(solver=pulp.GLPK(msg=0))
@@ -263,10 +264,9 @@ def load_OPENML(N: int, M: int, T: int, FILE_NAME: str):
     # train, validate and test on original dataset
     input_tra, label_tra = load(index_tra)
     input_val, label_val = load(index_val)
-    input_tes, label_tes = load(index_tes)
-    return (input_tra, label_tra), (input_val, label_val), (input_tes, label_tes)
+    return (input_tra, label_tra), (input_val, label_val)
 
-def experiment_1(K: int, S: list[int], predict: object, dataset: tuple[tuple, tuple, tuple]):
+def experiment_1(K: int, S: list[int], predict: object, dataset: tuple[tuple, tuple]):
     """
     Experiment 1 try to demonstrate when validation set changes, the data selection performance may change drastically even if Shapley value don't change. Therefore, Shapley value may not be a good indicator for data selection. 
     Perform validation data alternating on MNIST dataset. 
@@ -282,61 +282,52 @@ def experiment_1(K: int, S: list[int], predict: object, dataset: tuple[tuple, tu
     # train, validate and test on original dataset
     input_tra, label_tra = dataset[0]
     input_val, label_val = dataset[1]
-    input_tes, label_tes = dataset[2]
     N = input_tra.shape[0]
-    T = input_tes.shape[0]
     S = [int(x*N/max(S)) for x in S]
-    label_tes = knn_predict(K, input_val, label_val, input_tes)
-    # use knn as proximal construction method to compute shapley value
-    sv_0 = knn_shapley(K, input_tra, label_tra, input_val, label_val)
-    select = sv_0.argsort(-1)
-    result_0 = []
-    for s in S:
-        acc = (label_tes == predict(input_tra[select[N-s:]], label_tra[select[N-s:]], input_tes)).sum().item() / T
-        result_0.append(acc)
-    # randomly select samples
-    def compute():
-        sv_1 = sv_0[t.argsort(t.rand(*sv_0.shape), dim=-1)]
-        select = sv_1.argsort(-1)
-        result_1 = []
-        for s in S:
-            acc = (label_tes == predict(input_tra[select[N-s:]], label_tra[select[N-s:]], input_tes)).sum().item() / T
-            result_1.append(acc)
-        return result_1, sv_1
-    result_1, sv_1 = [], []
-    for i in range(100):
-        _result_1, _sv_1 = compute()
-        result_1.append(_result_1)
-        sv_1.append(_sv_1)
+    rand = t.rand_like(label_val * 1.0)
     # construct label-altered validation set and testing
-    index_alt = knn_alter_validation(
-        K, min(S), input_tra, label_tra, input_val, label_val)
     def compute(index):
         input_alt, label_alt = input_val[index], label_val[index]
-        label_tes = knn_predict(K, input_alt, label_alt, input_tes)
         sv_2 = knn_shapley(K, input_tra, label_tra, input_alt, label_alt)
+        T = input_alt.shape[0]
         select = sv_2.argsort(-1)
         result_2 = []
         for s in S:
-            acc = (label_tes == predict(input_tra[select[N-s:]], label_tra[select[N-s:]], input_tes)).sum().item() / T
+            acc = (label_alt == predict(input_tra[select[N-s:]], label_tra[select[N-s:]], input_alt)).sum().item() / T
             result_2.append(acc)
         sv_3 = sv_2[t.argsort(t.rand(*sv_2.shape), dim=-1)]
         select = sv_3.argsort(-1)
         result_3 = []
         for s in S:
-            acc = (label_tes == predict(input_tra[select[N-s:]], label_tra[select[N-s:]], input_tes)).sum().item() / T
+            acc = (label_alt == predict(input_tra[select[N-s:]], label_tra[select[N-s:]], input_alt)).sum().item() / T
             result_3.append(acc)
         return result_2, result_3, sv_2, sv_3
+    label_val = knn_predict(K, input_tra, label_tra, input_val)
+    index_max = knn_alter_validation(
+        K, min(S), input_tra, label_tra, input_val, label_val, minimize=False)
     result_2, result_3, sv_2, sv_3 = [], [], [], []
-    for index in index_alt:
+    for index in index_max:
         _result_2, _result_3, _sv_2, _sv_3 = compute(index)
         result_2.append(_result_2)
         result_3.append(_result_3)
         sv_2.append(_sv_2)
         sv_3.append(_sv_3)
+    label_val = (
+        (rand <  0.5) * t.randint_like(label_val, label_val.max()) + 
+        (rand >= 0.5) * knn_predict(K, input_tra, label_tra, input_val)
+    )
+    index_min = knn_alter_validation(
+        K, min(S), input_tra, label_tra, input_val, label_val, minimize=True)
+    result_0, result_1, sv_0, sv_1 = [], [], [], []
+    for index in index_min:
+        _result_0, _result_1, _sv_0, _sv_1 = compute(index)
+        result_0.append(_result_0)
+        result_1.append(_result_1)
+        sv_0.append(_sv_0)
+        sv_1.append(_sv_1)
     return S, result_0, result_1, result_2, result_3, sv_0, sv_1, sv_2, sv_3
 
-def experiment_2(K: int, S: int, N: int, dataset: tuple[tuple, tuple, tuple]):
+def experiment_2(K: int, dataset: tuple[tuple, tuple, tuple]):
     """
     Experiment 2 is about failure patterns of Shapley values. 
     -- Add a few samples in training set and validation set. 
@@ -357,14 +348,18 @@ def experiment_2(K: int, S: int, N: int, dataset: tuple[tuple, tuple, tuple]):
     pic = dataset[3]
     for p in pic: print(p)
     sv = knn_shapley(K, input_tra, label_tra, input_val, label_val)
-    index = sv.argsort(0, descending=True)
-    index = index[(t.arange(0, len(index) - len(index)//S, len(index)//S).unsqueeze(-1) + t.arange(0, N)).flatten()]
-    return [pic[i][0] for i in index], sv[index], [pic[i][1] for i in index]
+    sv_distribution = []
+    asort = sv.argsort()
+    for i in range(10):
+        sv_distribution.append((1.0 * (label_tra[asort] == i)).cumsum(0))
+        print((1.0 * (label_tra[asort] == i)).cumsum(0).shape)
+    return sv_distribution
 
 def run_experiment_1():
     import matplotlib.pyplot as plt
     files = \
     """
+    phoneme_1489.pkl
     2dplanes_727.pkl
     cpu_act_761.pkl
     vehicle_sensIT_357.pkl
@@ -373,7 +368,6 @@ def run_experiment_1():
     Click_prediction_small_1218.pkl
     default-of-credit-card-clients_42477.pkl
     APSFailure_41138.pkl
-    phoneme_1489.pkl
     """
     import pickle
     S = [i+1 for i in range(20)]
@@ -422,10 +416,11 @@ def illustrate_experiment_1():
             # sv_2: shapley value for each training datum by altered validation set
             # sv_3: shapley value for each training datum by randomized validation set
             S, result_0, result_1, result_2, result_3, sv_0, sv_1, sv_2, sv_3 = pickle.load(f)
-            result_1, result_2, result_3 = t.tensor(result_1), t.tensor(result_2), t.tensor(result_3)
+            result_0, result_1, result_2, result_3 = t.tensor(result_0), t.tensor(result_1), t.tensor(result_2), t.tensor(result_3)
         plt.subplot(1, 2, 1)
         plt.title(dataset + '-original')
-        plt.plot(S, result_0, label='original', color='red')
+        plt.plot(S, result_0.mean(0), label='original', color='red')
+        plt.fill_between(S, result_0.mean(0)-result_0.std(0), result_0.mean(0)+result_0.std(0), alpha=0.5, color='red')
         plt.plot(S, result_1.mean(0), label='random', color='blue')
         plt.fill_between(S, result_1.mean(0)-result_1.std(0), result_1.mean(0)+result_1.std(0), alpha=0.5, color='blue')
         plt.legend()
@@ -440,9 +435,11 @@ def illustrate_experiment_1():
         plt.gcf().clear()
         # sort by original shapley value and fill
         plt.title(dataset)
+        sv_0 = t.stack(sv_0).mean(0)
+        sv_2 = t.stack(sv_2).mean(0)
         asort = sv_0.argsort()
         plt.fill_between(range(sv_0.shape[0]), sv_0[asort], alpha=0.7, label='original', color='red')
-        plt.fill_between(range(sv_0.shape[0]), t.stack(sv_2)[..., asort].mean(0), alpha=0.7, label='altered', color='blue')
+        plt.fill_between(range(sv_0.shape[0]), sv_2[asort], alpha=0.7, label='altered', color='blue')
         plt.legend()
         plt.savefig('fig/' + dataset.split('.')[0] + '-shapley-value.png')
         plt.gcf().clear()
@@ -451,12 +448,8 @@ def run_experiment_2():
     # progressively add more deer in validation
     # check knn
     import matplotlib.pyplot as plt
-    K = 5
-    S = 3
-    N = 5
-    pic, sv, label = experiment_2(K, S, N, load_CIFAR(50000, 10000, 100))
-    print(sv.shape)
-    fig, ax = plt.subplots(S, N)
+    K = 15
+    distribution = experiment_2(K, load_CIFAR(5000, 1000, 100))
     label_map = {
         0: 'airplane',
         1: 'automobile',
@@ -469,15 +462,14 @@ def run_experiment_2():
         8: 'ship',
         9: 'truck',
     }
-    for i in range(S):
-        for j in range(N):
-            ax[i, j].set_title(f"\n{sv[i*N+j].item():.2f}"+
-                               f"\n{label_map[label[i*N+j]]}")
-            ax[i, j].axis("off")
-            ax[i, j].imshow(pic[i * N + j])
-    fig.tight_layout()
-    plt.savefig('fig/' + 'experiment-2.png')
+    for i in range(10):
+        print(distribution[i].shape)
+        plt.plot(range(distribution[i].shape[0]), distribution[i], 
+                         label=label_map[i], alpha=0.5)
+    plt.legend()
+    plt.savefig('fig/' + 'experiment-no-legend-2.png', dpi=200)
 
 if __name__ == '__main__':
     run_experiment_1()
-    illustrate_experiment_1()
+    # illustrate_experiment_1()
+    # run_experiment_2()
