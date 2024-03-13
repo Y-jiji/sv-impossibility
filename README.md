@@ -1,2 +1,2 @@
 # sv-impossibility
-Empirical results for ICML 24 "On the impossibility of data selection using Shapley Values". 
+Empirical results for ICML 24 "Rethinking Data Shapley for Data Selection Tasks: Misleads and Merits". 
