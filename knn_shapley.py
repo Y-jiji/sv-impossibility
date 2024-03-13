@@ -77,59 +77,6 @@ def reg_predict(C: int, input_tra: t.Tensor, label_tra: t.Tensor, input_val: t.T
     except:
         return t.zeros(input_val.shape[0]).fill_(label_tra[0])
 
-def knn_alter_validation(
-        K: int, S: int, 
-        input_tra: t.Tensor, label_tra: t.Tensor, 
-        input_val: t.Tensor, label_val: t.Tensor,
-        minimize: bool = True,
-    ):
-    """
-    Change validation set for a given K-nearest neighbour model s.t. : 
-    -- In terms of Shapely values, the same training subset still contains elements with largest Shapley values. 
-    -- Valuation results change. 
-    Current implementation is given by relabeling. 
-    INPUT: 
-        K: K-nearest neighbours K
-        S: selected subset S
-        input_tra: training dataset input, shape [N, D]
-        label_tra: training dataset label, shape [N]
-        input_val: validation dataset input, shape [M, D]
-        label_val: validation dataset label, shape [M]
-    OUTPUT: 
-        a different validation data set, with input and label, satisfying desired properties. 
-    """
-    import pulp # linear programming package
-    from tqdm import tqdm
-    from random import random, seed
-    seed(114514)
-    N, D = input_tra.shape
-    M, D = input_val.shape
-    lp = pulp.LpProblem("alter-validation", pulp.LpMaximize)
-    sv_list = knn_shapley(K, input_tra, label_tra, input_val, label_val, keep=True)
-    sv_rank = sv_list.sum(0).argsort(0)
-    index_var = pulp.LpVariable.dict("selection-index", range(M))
-    for i in range(M):
-        pulp.LpVariable.setInitialValue(index_var[i], 0.5)
-    for i in range(M):
-        lp += index_var[i] <= 1.0
-        lp += index_var[i] >= 0.0
-    index_trg = knn_predict(K, input_tra[sv_rank[-S:]], label_tra[sv_rank[-S:]], input_val) == label_val
-    index_trg = index_trg.float()
-    sv_alte = [pulp.lpSum([sv_list[i, j] * index_var[i] for i in range(M)]) for j in tqdm(range(N), "compute shapley values")]
-    gap = pulp.LpVariable.dict("gap", range(N-1), 0.0)
-    tot = pulp.lpSum(gap)
-    for j in range(N-1):
-        lp += sv_alte[sv_rank[j]] <= sv_alte[sv_rank[j+1]] + gap[j]
-    lp += (pulp.lpSum([index_var[i] for i in range(M)]) >= M//4)
-    lp += (pulp.lpSum([index_var[i] for i in range(M)]) <= M*3//4)
-    lp += (1 if minimize else -1) * pulp.lpSum(
-        [index_var[i] * index_trg[i] + (1-index_var[i]) * (1-index_trg[i])
-         for i in range(M)]) - tot * 1000
-    lp.solve(solver=pulp.GLPK(msg=0))
-    index_new = t.tensor([index_var[i].value() for i in range(M)])
-    index_new = index_new > t.rand(100, *index_new.shape)
-    return index_new
-
 def test_knn_alter_validation_sv_eq():
     K = 15
     data = load_RANDOM(1000, 200, 200, 10)
@@ -254,9 +201,9 @@ def load_OPENML(N: int, M: int, T: int, FILE_NAME: str):
     A = x.shape[0]
     index_all = list(range(A))
     shuffle(index_all)
-    A = x.shape[0] // 4
+    A = x.shape[0]
     index_all = index_all[:A]
-    N, M, T = A*N//(N+M+T), A*M//(N+M+T), A*T//(N+M+T)
+    N, M, T = min(999, A*N//(N+M+T)), min(999, A*M//(N+M+T)), A*T//(N+M+T)
     index_all = index_all[:N+M+T]
     index_tra = index_all[0:N]
     index_val = index_all[N:N+M]
@@ -266,7 +213,7 @@ def load_OPENML(N: int, M: int, T: int, FILE_NAME: str):
     input_val, label_val = load(index_val)
     return (input_tra, label_tra), (input_val, label_val)
 
-def experiment_1(K: int, S: list[int], predict: object, dataset: tuple[tuple, tuple]):
+def experiment_1(K: int, S: list[int], dataset: tuple[tuple, tuple]):
     """
     Experiment 1 try to demonstrate when validation set changes, the data selection performance may change drastically even if Shapley value don't change. Therefore, Shapley value may not be a good indicator for data selection. 
     Perform validation data alternating on MNIST dataset. 
@@ -280,52 +227,48 @@ def experiment_1(K: int, S: list[int], predict: object, dataset: tuple[tuple, tu
         valutation result correspondent to selected data. 
     """
     # train, validate and test on original dataset
+    import pulp # linear programming package
+    from tqdm import tqdm
+    import string
+    import random
     input_tra, label_tra = dataset[0]
     input_val, label_val = dataset[1]
-    N = input_tra.shape[0]
-    S = [int(x*N/max(S)) for x in S]
-    rand = t.rand_like(label_val * 1.0)
-    # construct label-altered validation set and testing
-    def compute(index):
-        input_alt, label_alt = input_val[index], label_val[index]
-        sv_2 = knn_shapley(K, input_tra, label_tra, input_alt, label_alt)
-        T = input_alt.shape[0]
-        select = sv_2.argsort(-1)
-        result_2 = []
-        for s in S:
-            acc = (label_alt == predict(input_tra[select[N-s:]], label_tra[select[N-s:]], input_alt)).sum().item() / T
-            result_2.append(acc)
-        sv_3 = sv_2[t.argsort(t.rand(*sv_2.shape), dim=-1)]
-        select = sv_3.argsort(-1)
-        result_3 = []
-        for s in S:
-            acc = (label_alt == predict(input_tra[select[N-s:]], label_tra[select[N-s:]], input_alt)).sum().item() / T
-            result_3.append(acc)
-        return result_2, result_3, sv_2, sv_3
-    label_val = knn_predict(K, input_tra, label_tra, input_val)
-    index_max = knn_alter_validation(
-        K, min(S), input_tra, label_tra, input_val, label_val, minimize=False)
-    result_2, result_3, sv_2, sv_3 = [], [], [], []
-    for index in index_max:
-        _result_2, _result_3, _sv_2, _sv_3 = compute(index)
-        result_2.append(_result_2)
-        result_3.append(_result_3)
-        sv_2.append(_sv_2)
-        sv_3.append(_sv_3)
-    label_val = (
-        (rand <  0.5) * t.randint_like(label_val, label_val.max()) + 
-        (rand >= 0.5) * knn_predict(K, input_tra, label_tra, input_val)
-    )
-    index_min = knn_alter_validation(
-        K, min(S), input_tra, label_tra, input_val, label_val, minimize=True)
-    result_0, result_1, sv_0, sv_1 = [], [], [], []
-    for index in index_min:
-        _result_0, _result_1, _sv_0, _sv_1 = compute(index)
-        result_0.append(_result_0)
-        result_1.append(_result_1)
-        sv_0.append(_sv_0)
-        sv_1.append(_sv_1)
-    return S, result_0, result_1, result_2, result_3, sv_0, sv_1, sv_2, sv_3
+    M, D = input_val.shape
+    N, D = input_tra.shape
+    sv = knn_shapley(K, input_tra, label_tra, input_val, label_val, True).to('cpu')
+    assert (*sv.shape,) == (M, N)
+    asort = sv.sum(-2).argsort(-1, descending=True).to('cpu')
+    rperm = t.randperm(N, device=input_val.device).to('cpu')
+    results = []
+    for s in map(lambda x: int(N * x), tqdm(S)):
+        print(M, N)
+        prediction = knn_predict(K, input_tra[rperm[:s]], label_tra[rperm[:s]], input_val)
+        z_rnd = 1 * (label_val == prediction)
+        prediction = knn_predict(K, input_tra[asort[:s]], label_tra[asort[:s]], input_val)
+        z_trg = 1 * (label_val == prediction)
+        z_rnd_mean = z_rnd.float().mean().item()
+        z_trg_mean = z_trg.float().mean().item() 
+        z_sel = pulp.LpVariable.dict(f"selection", range(M), cat="Binary")
+        for i in range(M): z_sel[i].setInitialValue(1.0)
+        lp = pulp.LpProblem(f"alter-validation", pulp.LpMaximize)
+        sv_sum = [pulp.lpSum([z_sel[j] * sv[j, i] for j in range(M)]) for i in range(N)]
+        bound = pulp.LpVariable(f"bound", cat="Continuous")
+        for i in asort[:s]: lp += sv_sum[i] >= bound
+        for i in asort[s:]: lp += sv_sum[i] <= bound
+        objective = pulp.lpSum(
+            [z_sel[j] * 1 * (z_trg[j] - z_rnd[j]) for j in range(M)]
+            if z_trg_mean < z_rnd_mean else
+            [z_sel[j] * 1 * (z_rnd[j] - z_trg[j]) for j in range(M)]
+        )
+        lp += (objective >= 0)
+        lp += objective
+        lp.solve(pulp.CPLEX_PY(warmStart=True, gapRel=0.5))
+        z_sel = t.tensor([z_sel[j].value() * 1.0 for j in range(M)], device=z_trg.device)
+        z_trg_alt_mean = (((z_trg * z_sel).mean() + 1e-12) / (z_sel.mean() + 1e-12)).item()
+        z_rnd_alt_mean = (((z_rnd * z_sel).mean() + 1e-12) / (z_sel.mean() + 1e-12)).item()
+        print(results)
+        results.append((s, z_trg_mean, z_rnd_mean, z_trg_alt_mean, z_rnd_alt_mean))
+    return results
 
 def experiment_2(K: int, dataset: tuple[tuple, tuple, tuple]):
     """
@@ -348,101 +291,80 @@ def experiment_2(K: int, dataset: tuple[tuple, tuple, tuple]):
     pic = dataset[3]
     for p in pic: print(p)
     sv = knn_shapley(K, input_tra, label_tra, input_val, label_val)
-    sv_distribution = []
-    asort = sv.argsort()
-    for i in range(10):
-        sv_distribution.append((1.0 * (label_tra[asort] == i)).cumsum(0))
-        print((1.0 * (label_tra[asort] == i)).cumsum(0).shape)
-    return sv_distribution
+    asort = sv.argsort(descending=True)
+    sv_distribution = (1.0 * (label_tra[asort] == t.arange(10).unsqueeze(-1))).cumsum(1)
+    return sv_distribution / sv_distribution.max(0, keepdim=True).values
 
 def run_experiment_1():
     import matplotlib.pyplot as plt
+    # 2dplanes_727.pkl
+    # Click_prediction_small_1218.pkl
+    # CreditCardFraudDetection_42397.pkl
+    # phoneme_1489.pkl
+    # vehicle_sensIT_357.pkl
+    # APSFailure_41138.pkl  
+    # cpu_act_761.pkl
+    # default-of-credit-card-clients_42477.pkl
     files = \
     """
-    phoneme_1489.pkl
-    2dplanes_727.pkl
-    cpu_act_761.pkl
-    vehicle_sensIT_357.pkl
     pol_722.pkl
     wind_847.pkl
-    Click_prediction_small_1218.pkl
-    default-of-credit-card-clients_42477.pkl
-    APSFailure_41138.pkl
     """
     import pickle
-    S = [i+1 for i in range(20)]
-    data = experiment_1(15, S, 
-        lambda x_tra, y_tra, x_val: knn_predict(15, x_tra, y_tra, x_val), 
-        dataset=load_CIFAR(1200, 400, 400)
-    )
-    with open(f"_plotdata/cifar", 'wb') as f:
-        pickle.dump((data), f)
+    S = [0.1*i for i in range(1, 10)]
     for dataset in files.strip().splitlines():
         dataset = dataset.strip()
-        S = [i+1 for i in range(20)]
-        data = experiment_1(15, S, 
-            lambda x_tra, y_tra, x_val: knn_predict(15, x_tra, y_tra, x_val), 
-            dataset=load_OPENML(6, 2, 2, dataset)
-        )
+        data = experiment_1(5, S, dataset=load_OPENML(6, 2, 0, dataset))
         with open(f"_plotdata/{dataset}", 'wb') as f:
-            pickle.dump((data), f)
+            pickle.dump(data, f)
 
 def illustrate_experiment_1():
     import matplotlib.pyplot as plt
+    import matplotlib
     files = \
     """
-    cifar
-    2dplanes_727.pkl
-    cpu_act_761.pkl
+    phoneme_1489.pkl
     vehicle_sensIT_357.pkl
+    APSFailure_41138.pkl  
+    cpu_act_761.pkl
     pol_722.pkl
     wind_847.pkl
-    Click_prediction_small_1218.pkl
-    default-of-credit-card-clients_42477.pkl
-    APSFailure_41138.pkl
-    phoneme_1489.pkl
     """
+    font = {'size': 10}
+    matplotlib.rc('font', **font)
+    plt.rcParams["font.family"] = 'serif'
+    matplotlib.rc('xtick', labelsize=20)
+    matplotlib.rc('ytick', labelsize=20)
+    matplotlib.rc('axes', labelsize=20)    # fontsize for xlabel and ylabel
+    matplotlib.rc('axes', titlesize=20)    # fontsize for title
+    # Click_prediction_small_1218.pkl
+    # default-of-credit-card-clients_42477.pkl
     import pickle
-    for dataset in files.strip().splitlines():
-        dataset = dataset.strip()
-        with open(f"_plotdata/{dataset}", 'rb') as f:
-            # S: selected dataset size
-            # result_0: accuracy when selecting with original validation set
-            # result_1: accuracy when selection with randomized validation set
-            # result_2: accuracy when selection with altered validation set
-            # result_3: accuracy when selection with randomized validation set
-            # sv_0: shapley value for each training datum by original validation set
-            # sv_1: shapley value for each training datum by randomized validation set
-            # sv_2: shapley value for each training datum by altered validation set
-            # sv_3: shapley value for each training datum by randomized validation set
-            S, result_0, result_1, result_2, result_3, sv_0, sv_1, sv_2, sv_3 = pickle.load(f)
-            result_0, result_1, result_2, result_3 = t.tensor(result_0), t.tensor(result_1), t.tensor(result_2), t.tensor(result_3)
-        plt.subplot(1, 2, 1)
-        plt.title(dataset + '-original')
-        plt.plot(S, result_0.mean(0), label='original', color='red')
-        plt.fill_between(S, result_0.mean(0)-result_0.std(0), result_0.mean(0)+result_0.std(0), alpha=0.5, color='red')
-        plt.plot(S, result_1.mean(0), label='random', color='blue')
-        plt.fill_between(S, result_1.mean(0)-result_1.std(0), result_1.mean(0)+result_1.std(0), alpha=0.5, color='blue')
-        plt.legend()
-        plt.subplot(1, 2, 2)
-        plt.title(dataset + '-altered')
-        plt.plot(S, result_2.mean(0), label='altered', color='red')
-        plt.plot(S, result_3.mean(0), label='random', color='blue')
-        plt.fill_between(S, result_2.mean(0)-result_2.std(0), result_2.mean(0)+result_2.std(0), alpha=0.5, color='red')
-        plt.fill_between(S, result_3.mean(0)-result_3.std(0), result_3.mean(0)+result_3.std(0), alpha=0.5, color='blue')
-        plt.legend()
-        plt.savefig('fig/' + dataset.split('.')[0] + '-accuracy.png')
-        plt.gcf().clear()
-        # sort by original shapley value and fill
-        plt.title(dataset)
-        sv_0 = t.stack(sv_0).mean(0)
-        sv_2 = t.stack(sv_2).mean(0)
-        asort = sv_0.argsort()
-        plt.fill_between(range(sv_0.shape[0]), sv_0[asort], alpha=0.7, label='original', color='red')
-        plt.fill_between(range(sv_0.shape[0]), sv_2[asort], alpha=0.7, label='altered', color='blue')
-        plt.legend()
-        plt.savefig('fig/' + dataset.split('.')[0] + '-shapley-value.png')
-        plt.gcf().clear()
+    plt.rcParams['legend.fontsize'] = 20
+    fig = plt.figure(figsize=(18, 12), dpi=150)
+    for i, dataset in enumerate(files.strip().splitlines()):
+        dataset = dataset.strip().split(".")[0]
+        with open(f"_plotdata/{dataset}.pkl", "rb") as f:
+            data = pickle.load(f)
+            S, z_trg_mean, z_rnd_mean, z_trg_alt_mean, z_rnd_alt_mean = list(zip(*data))
+        plt.subplot(2, 3, i+1)
+        S = t.tensor([0.1*i for i in range(1, 10)])
+        # 
+        plt.plot(S, z_trg_mean, label="$v_1$, shapley", color='blue')
+        plt.plot(S, z_rnd_mean, label="$v_1$, random", color='blue', linestyle='--')
+        # 
+        z_trg_alt_mean = t.tensor(z_trg_alt_mean)
+        z_rnd_alt_mean = t.tensor(z_rnd_alt_mean)
+        neq = (z_trg_alt_mean < 1.0).argwhere()[:, 0]
+        plt.plot(S[neq], z_trg_alt_mean[neq], label="$v_2$, shapley", color='red')
+        plt.plot(S[neq], z_rnd_alt_mean[neq], label="$v_2$, random", color='red', linestyle='--')
+        plt.xticks(ticks=S, labels=['{:,.0%}'.format(x.item()) for x in S], rotation=30)
+        plt.xlabel('selected training set')
+        plt.ylabel('validation accuracy')
+        plt.title(label=f'{" ".join(dataset.split("_")[:-1])}')
+        plt.legend(loc='upper right')
+    plt.tight_layout()
+    plt.savefig('fig/experiment-1-all.png')
 
 def run_experiment_2():
     # progressively add more deer in validation
@@ -463,13 +385,11 @@ def run_experiment_2():
         9: 'truck',
     }
     for i in range(10):
-        print(distribution[i].shape)
         plt.plot(range(distribution[i].shape[0]), distribution[i], 
-                         label=label_map[i], alpha=0.5)
+                 label=label_map[i], alpha=0.5)
     plt.legend()
     plt.savefig('fig/' + 'experiment-no-legend-2.png', dpi=200)
 
 if __name__ == '__main__':
-    run_experiment_1()
-    # illustrate_experiment_1()
-    # run_experiment_2()
+    # run_experiment_1()
+    illustrate_experiment_1()
